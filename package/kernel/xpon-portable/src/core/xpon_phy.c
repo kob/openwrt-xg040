@@ -154,8 +154,158 @@ static int xpon_epon_init(struct xpon_dev *xp)
 	dev_info(xp->dev, "XEPON: EPON MAC init done (mode=%s, GLB_CFG=0x%08x)\n",
 		 (xp->mode == XPON_MODE_XEPON) ? "10G-EPON" : "1G-EPON",
 		 xpon_readl(ep, EPON_GLB_CFG));
+
+	xpon_epon_start_registration(xp);
 	return 0;
 }
+
+/* --- XEPON (10G-EPON) MPCP registration FSM -------------------------------- */
+
+/* Ask the HW to emit a REGISTER_REQUEST on the next discovery opportunity. The
+ * MPCP command register differs by framing (10G-XEPON uses EPON_MPCP_TX_DONE
+ * @0x07c; 1G EPON uses EPON_LLID_DSCVRY_CTRL @0x028 -- same bit layout). */
+static void xpon_epon_send_register_request(struct xpon_dev *xp)
+{
+	void __iomem *ep = xp->mac2;
+	u32 cmd = EPON_MPCP_CMD_REG(xp);
+
+	if (!ep)
+		return;
+	xpon_writel(ep, cmd, xpon_readl(ep, cmd) | EPON_DSCVRY_MPCP_REG_REQ);
+}
+
+/* Auto-send REGISTER_ACK to the OLT after a REGISTER frame (MPCP_CMD[ACK] +
+ * CMD_DONE). Observed in stock epon_dev_send_mpcp_register_ack (writes window
+ * 0x607c = EPON_MPCP_TX_DONE with 0xc0000000 | 0x10000). */
+static void xpon_epon_send_register_ack(struct xpon_dev *xp)
+{
+	void __iomem *ep = xp->mac2;
+	u32 cmd = EPON_MPCP_CMD_REG(xp);
+
+	if (!ep)
+		return;
+	xpon_writel(ep, cmd,
+		    xpon_readl(ep, cmd) | EPON_DSCVRY_MPCP_ACK | EPON_DSCVRY_CMD_DONE);
+}
+
+/* Handle a received REGISTER frame for LLID n: capture the assigned onu_id,
+ * program our ONU MAC as the LLID source address, enable the LLID data path,
+ * then auto-send REGISTER_ACK. */
+static void xpon_epon_handle_register(struct xpon_dev *xp, unsigned int n)
+{
+	void __iomem *ep = xp->mac2;
+	u32 cfg, onu_id;
+
+	if (!ep || n >= EPON_MAX_LLID)
+		return;
+
+	/* The assigned LLID (onu_id) is stored by HW in the per-LLID 8-bit slice
+	 * of EPON_LLID0_3_CFG / EPON_LLID4_7_CFG on REGISTER. */
+	cfg = xpon_readl(ep, EPON_LLID_CFG_REG(n));
+	onu_id = (cfg >> EPON_LLID_CFG_SHIFT(n)) & EPON_LLID_CFG_LLID_MASK;
+	xp->epon_llid_id[n] = onu_id;
+
+	/* Program our ONU MAC as the source MAC for this LLID's upstream frames
+	 * (EPON_LLID_MAC_ADDR_0/1 == window 0x6104/0x6108). TODO: source this from
+	 * the factory MAC / DTS; for now it is xp->epon_onu_mac (default zero). */
+	xpon_writel(ep, EPON_LLID_MAC_ADDR_0,
+		    ((u32)xp->epon_onu_mac[0] << 24) | ((u32)xp->epon_onu_mac[1] << 16) |
+		    ((u32)xp->epon_onu_mac[2] <<  8) |  (u32)xp->epon_onu_mac[3]);
+	xpon_writel(ep, EPON_LLID_MAC_ADDR_1,
+		    ((u32)xp->epon_onu_mac[4] << 24) | ((u32)xp->epon_onu_mac[5] << 16));
+
+	/* Enable the LLID data path. NOTE: the enable-bit position is UNVERIFIED
+	 * (placeholder EPON_LLID_CFG_EN); confirm on hardware. */
+	cfg = xpon_readl(ep, EPON_LLID_CFG_REG(n));
+	cfg &= ~(EPON_LLID_CFG_LLID_MASK << EPON_LLID_CFG_SHIFT(n));
+	cfg |= (u32)onu_id << EPON_LLID_CFG_SHIFT(n);
+	cfg |= EPON_LLID_CFG_EN << EPON_LLID_CFG_SHIFT(n);
+	xpon_writel(ep, EPON_LLID_CFG_REG(n), cfg);
+
+	xpon_epon_send_register_ack(xp);
+
+	xp->epon_llid_state[n] = EPON_LLID_ST_WAIT_ACK;
+	dev_info(xp->dev, "XEPON: LLID%d got REGISTER (onu_id=%u), REGISTER_ACK sent\n",
+		 n, onu_id);
+}
+
+irqreturn_t xpon_epon_isr(struct xpon_dev *xp)
+{
+	void __iomem *ep = xp->mac2;
+	u32 status, en, pend;
+	unsigned int n;
+	unsigned long flags;
+
+	if (!ep)
+		return IRQ_NONE;
+	status = xpon_readl(ep, EPON_INT_STATUS);
+	en = xpon_readl(ep, EPON_INT_EN);
+	pend = status & en;
+	if (!pend)
+		return IRQ_NONE;
+	xpon_writel(ep, EPON_INT_STATUS, pend);	/* write-1-to-clear */
+
+	spin_lock_irqsave(&xp->epon_fsm_lock, flags);
+
+	/* Discovery gate from the OLT: trigger REGISTER_REQUEST for any idle LLID. */
+	if (pend & EPON_INT_DISCV_GATE) {
+		for (n = 0; n < EPON_MAX_LLID; n++)
+			if (xp->epon_llid_state[n] == EPON_LLID_ST_INIT)
+				xp->epon_llid_state[n] = EPON_LLID_ST_WAIT_REG;
+		xpon_epon_send_register_request(xp);
+	}
+
+	/* Per-LLID REGISTER frame received -> register and ACK. */
+	for (n = 0; n < EPON_MAX_LLID; n++)
+		if (pend & EPON_INT_LLID_RGST(n))
+			xpon_epon_handle_register(xp, n);
+
+	/* REGISTER_ACK fully sent: mark WAIT_ACK LLIDs as REGISTERED. */
+	if (pend & EPON_INT_REG_ACK_DONE) {
+		for (n = 0; n < EPON_MAX_LLID; n++)
+			if (xp->epon_llid_state[n] == EPON_LLID_ST_WAIT_ACK)
+				xp->epon_llid_state[n] = EPON_LLID_ST_REGISTERED;
+		dev_info(xp->dev, "XEPON: registration complete (LLID(s) up)\n");
+	}
+
+	if (pend & EPON_INT_REG_REQ_DONE)
+		dev_dbg(xp->dev, "XEPON: REGISTER_REQUEST sent\n");
+	if (pend & EPON_INT_MPCP_TIMEOUT)
+		dev_dbg(xp->dev, "XEPON: MPCP timeout\n");
+
+	spin_unlock_irqrestore(&xp->epon_fsm_lock, flags);
+	return IRQ_HANDLED;
+}
+
+void xpon_epon_start_registration(struct xpon_dev *xp)
+{
+	unsigned long flags;
+	unsigned int n;
+
+	if (!xp->mac2)
+		return;
+	spin_lock_irqsave(&xp->epon_fsm_lock, flags);
+	for (n = 0; n < EPON_MAX_LLID; n++) {
+		xp->epon_llid_state[n] = EPON_LLID_ST_INIT;
+		xp->epon_llid_id[n] = 0;
+	}
+	spin_unlock_irqrestore(&xp->epon_fsm_lock, flags);
+	dev_info(xp->dev, "XEPON: MPCP registration FSM started; awaiting discovery gate\n");
+}
+
+void xpon_epon_stop_registration(struct xpon_dev *xp)
+{
+	unsigned long flags;
+	unsigned int n;
+
+	if (!xp->mac2)
+		return;
+	spin_lock_irqsave(&xp->epon_fsm_lock, flags);
+	for (n = 0; n < EPON_MAX_LLID; n++)
+		xp->epon_llid_state[n] = EPON_LLID_ST_INIT;
+	spin_unlock_irqrestore(&xp->epon_fsm_lock, flags);
+}
+
 int XPON_PHY_SET_MODE(enum xpon_mode mode)
 {
 	struct xpon_dev *xp = g_xp;

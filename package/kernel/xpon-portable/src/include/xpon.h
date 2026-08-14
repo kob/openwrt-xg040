@@ -148,6 +148,12 @@ struct xpon_dev {
 	void __iomem		*xgspon_reg;	/* XGS-PON MAC engine (mac + 0x5000) */
 	bool			serdes_phy_init;
 	bool			serdes_phy_powered;
+
+	/* 10G-EPON (XEPON) MPCP registration FSM state (xpon_phy.c) */
+	u8			epon_llid_state[EPON_MAX_LLID];
+	u8			epon_llid_id[EPON_MAX_LLID];
+	u8			epon_onu_mac[ETH_ALEN];	/* our MAC for LLID MAC addr; TBD source */
+	spinlock_t		epon_fsm_lock;
 };
 
 /* ----------------------- GPON MAC registers ---------------------------------
@@ -478,6 +484,7 @@ struct xpon_dev {
 #define  EPON_INT_LLID_RGST(n)	XP_BIT(1 + (n))	/* LLID n REGISTER frame received */
 #define  EPON_INT_REG_REQ_DONE	XP_BIT(24)	/* REGISTER_REQUEST sent by HW */
 #define  EPON_INT_REG_ACK_DONE	XP_BIT(25)	/* REGISTER_ACK sent by HW */
+#define  EPON_INT_MPCP_TIMEOUT	XP_BIT(14)	/* MPCP timeout (open-source EPON_INT_MPCP_TIMEOUT) */
 
 /* LLID discovery control (EPON_LLID_DSCVRY_CTRL) bit-fields */
 #define  EPON_DSCVRY_MPCP_REG_REQ	XP_BIT(30)	/* send REGISTER_REQUEST */
@@ -506,6 +513,54 @@ struct xpon_dev {
 
 /* Number of LLIDs the EPON MAC supports (open-source EPON_MAX_LLID) */
 #define EPON_MAX_LLID		8
+
+/* ---------------------------------------------------------------------------
+ * XEPON / 10G-EPON MPCP registration FSM
+ *
+ * Flow (IEEE 802.3av MPCP discovery/registration, driven by the EPON MAC HW
+ * interrupts; the register offsets/bit-fields are recovered from stock
+ * xpon_10g.ko + cross-checked against the open-source EN7523 airoha_xpon.c):
+ *
+ *   OLT  -DISCOVERY_GATE->  ONU  (EPON_INT_DISCV_GATE, bit0)
+ *     ONU HW auto-sends REGISTER_REQUEST  (we poke MPCP_CMD[REG_REQ])
+ *     ONU  -REGISTER_REQUEST->  OLT     (EPON_INT_REG_REQ_DONE, bit24)
+ *   OLT  -REGISTER(LLID=n)->  ONU       (EPON_INT_LLID_RGST(n), bit1+n)
+ *     ONU: read LLID cfg, write ONU MAC to EPON_LLID_MAC_ADDR, enable the
+ *          LLID data path, auto-send REGISTER_ACK (we poke MPCP_CMD[ACK])
+ *     ONU  -REGISTER_ACK->  OLT          (EPON_INT_REG_ACK_DONE, bit25)
+ *     ONU marks LLID n REGISTERED
+ *
+ * The MPCP command register differs by framing: 10G-XEPON uses
+ * EPON_MPCP_TX_DONE (0x07c, observed in stock epon_dev_send_mpcp_register_ack);
+ * 1G EPON uses EPON_LLID_DSCVRY_CTRL (0x028, open-source). Same bit layout.
+ * ------------------------------------------------------------------------- */
+enum xpon_epon_llid_state {
+	EPON_LLID_ST_INIT = 0,		/* not yet discovering */
+	EPON_LLID_ST_WAIT_REG,		/* REGISTER_REQUEST sent, awaiting REGISTER */
+	EPON_LLID_ST_WAIT_ACK,		/* REGISTER rcvd, ACK sent, awaiting ACK_DONE */
+	EPON_LLID_ST_REGISTERED,	/* registered with the OLT */
+};
+
+/* MPCP command register: pick per framing (see note above). */
+#define  EPON_MPCP_CMD_REG(xp) \
+	(((xp)->mode == XPON_MODE_XEPON) ? EPON_MPCP_TX_DONE : EPON_LLID_DSCVRY_CTRL)
+
+/* LLID configuration registers EPON_LLID0_3_CFG (0x020) / EPON_LLID4_7_CFG
+ * (0x024): the 8 LLIDs are packed 8 bits each. Field layout (per 8-bit slice,
+ * UNVERIFIED on hardware -- the enable-bit shift is a placeholder and MUST be
+ * confirmed on real silicon):
+ *   [7:0]  LLID value (onu_id), written by HW on REGISTER
+ *   [x]    LLID enable bit (TBD shift) */
+#define  EPON_LLID_CFG_LLID_MASK	0xff
+#define  EPON_LLID_CFG_EN		XP_BIT(8)	/* TBD shift, UNVERIFIED */
+#define  EPON_LLID_CFG_REG(n) \
+	(((n) < 4) ? EPON_LLID0_3_CFG : EPON_LLID4_7_CFG)
+#define  EPON_LLID_CFG_SHIFT(n)	(((n) & 3) * 8)
+
+/* XEPON (10G-EPON) runtime MPCP FSM entry points (xpon_phy.c). */
+irqreturn_t xpon_epon_isr(struct xpon_dev *xp);
+void xpon_epon_start_registration(struct xpon_dev *xp);
+void xpon_epon_stop_registration(struct xpon_dev *xp);
 
 /* Static-bring-up default values (open-source airoha_xpon.c). These are the
  * values the stock 1G EPON path writes; the 10G-XEPON block reuses them. */

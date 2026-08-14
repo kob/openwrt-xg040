@@ -380,6 +380,7 @@ static int xpon_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	xp->dev = &pdev->dev;
 	mutex_init(&xp->lock);
+	spin_lock_init(&xp->epon_fsm_lock);
 
 	/* map the three XPON MAC register regions */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
