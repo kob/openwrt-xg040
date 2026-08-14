@@ -369,6 +369,104 @@ struct xpon_dev {
 #define XGS_OMCI_IK1(n)		(0x390 + (n) * 4)	/* +0x5390..0x539c */
 #define XGS_OMCI_IK_IDX		0x3e8	/* +0x53e8 */
 
+/* ----------------------- 10G-EPON (XEPON) registers -----------------------
+ * 10G-EPON (Airoha calls it "XEPON", IEEE 802.3av) is a SEPARATE sub-block from
+ * XGS-PON. vendor airoha_xpon.c places GPON@0x4000 / XGS@0x5000 / EPON@0x6000
+ * as three sibling sub-blocks inside the one 64KB PON MAC window (0x1fb60000).
+ * The stock firmware xpon_10g.ko addresses EPON registers as
+ *   g_EPON_MAC_BASE (window 0x1fb60000) + 0x6xxx
+ * so the driver-side offset below == (0x6xxx - 0x6000) == the block-relative
+ * offset of the EPON sub-block. xp->mac2 == DTS reg[1] == 0x1fb66000 is exactly
+ * that sub-block base, so these offsets are RELATIVE TO xp->mac2.
+ *
+ * Layout cross-checked two ways:
+ *   (a) immediate-offset scan of every epon/an7581_epon_* fn in xpon_10g.ko
+ *       -> gave the 0x6004..0x6680 window-offset universe;
+ *   (b) open-source EN7523 airoha_xpon.c EPON map (EPON_REG_OFFSET 0x6000,
+ *       defines 0x000..0x134). Those names line up 1:1 with the firmware low
+ *       offsets (fw 0x6014 == EPON_PENDING_GNT_NUM 0x014, 0x6024 == LLID_DSCVRY
+ *       _CTRL 0x024, 0x6050 == MAC_ADDR_CFG 0x050, ...), so the base registers
+ *       below reuse the open-source names. Offsets >= 0x6104 (LLID MAC addr,
+ *       0x610c/0x6110 LLID key, 0x61d8 MPCP timeout, 0x6350/0x6360 DPOE key,
+ *       the 0x6510..0x6680 MIB counters) are the 10G-XEPON EXTENSION and are
+ *       NAMED FROM FIRMWARE FUNCTION CONTEXT, not the 1G source.
+ * Bit-field masks were read from the orr/and immediates in the firmware set_*
+ * helpers (epon_llid_enable, epon_mac_reset, an7581_epon_set_llid_key,
+ * an7581_epon_set_mpcp_tmout_intvl) and are marked TBD where ambiguous.
+ * NOT compiled / NOT hardware-verified. */
+#define EPON_GLB_CFG		0x000	/* global config; EPON_GLB_MAC_SW_RST = BIT(4) */
+#define EPON_INT_STATUS		0x004
+#define EPON_INT_EN		0x008
+#define EPON_RPT_MPCP_TIMEOUT	0x00C
+#define EPON_DYINGGSP_CFG	0x010
+#define EPON_PENDING_GNT_NUM	0x014
+#define EPON_LLID0_3_CFG	0x020
+#define EPON_LLID4_7_CFG	0x024
+#define EPON_LLID_DSCVRY_CTRL	0x028
+#define EPON_LLID0_DSCVRY_STS	0x02C
+#define EPON_MAC_ADDR_CFG	0x050
+#define EPON_MAC_ADDR_VALUE	0x054
+#define EPON_SECURITY_KEY_CFG	0x058
+#define EPON_SECURITY_KEY_DATA	0x05C
+#define EPON_RPT_DATA		0x060
+#define EPON_RPT_LEN		0x064
+#define EPON_RPT_CFG		0x068
+#define EPON_LOCAL_TIME		0x080
+#define EPON_TXFETCH_CFG	0x0D0
+#define EPON_SYNC_TIME		0x0D4
+#define EPON_TX_CAL_CNST	0x0D8
+#define EPON_LASER_ONOFF_TIME	0x0DC
+#define EPON_GRD_THRSHLD	0x0E0
+#define EPON_MPCP_TIMEOUT_INTVL	0x0E4
+#define EPON_RPT_TIMEOUT_INTVL	0x0E8
+#define EPON_MAX_FUTURE_GNT	0x0EC
+#define EPON_MIN_PROC_TIME	0x0F0
+#define EPON_TRX_ADJUST_TIME1	0x0F4
+#define EPON_TRX_ADJUST_TIME2	0x0F8
+
+/* --- 10G-XEPON extension (firmware window offset - 0x6000) --- */
+#define EPON_MPCP_TX_DONE	0x07C	/* MPCP reg-req/register-ack/tx-done (epon_reg_check_mpcp_tx_done) */
+#define EPON_LLID_MAC_ADDR_0	0x104	/* epon_set/get_llid_regs_mac_address */
+#define EPON_LLID_MAC_ADDR_1	0x108
+#define EPON_LLID_KEY_0		0x10C	/* an7581_epon_set/get_llid_key; +0x80000000 = key valid */
+#define EPON_LLID_KEY_1		0x110	/* an7581_epon_set_10G_llid_key */
+#define EPON_DPOE_ENCRYPT_KEY_CFG	0x114
+#define EPON_DPOE_ENCRYPT_LLID_KEY	0x118
+#define EPON_LLID_THRSHLD_NUM_0	0x124	/* an7581_epon_set/get_llid_thrshld_num */
+#define EPON_LLID_THRSHLD_NUM_1	0x128
+#define EPON_QUEUE_THRESHOLD_CFG	0x12C	/* an7581_epon_set/get_queue_threshold_cfg */
+#define EPON_STATIC_REPORT	0x130	/* an7581_epon_set_static_report */
+/* 1G EN7523 names 0x134 EPON_TIME_DRFT_STAT; in 10G-XEPON the firmware uses it
+ * for the LLID report bitmap (an7581_epon_set/get_llid_report_bitmap). */
+#define EPON_LLID_REPORT_BITMAP	0x134
+#define EPON_MAC_REPORT_QSIZE_ADJS	0x13C	/* an7581_epon_set_mac_report_qsizeadjs */
+#define EPON_MAC_REPORT_QSIZE_ADJS_FEC	0x140
+#define EPON_STATIC_REPORT_2	0x180
+#define EPON_MPCP_SYNC_TIME	0x1C4	/* epon_mpcp_set_sync_time */
+#define EPON_MPCP_TIMEOUT_10G	0x1D8	/* eponSet/GetMpcpTime, an7581_epon_set_mpcp_tmout_intvl */
+#define EPON_MAC_LOGIC_RST_0	0x1E8	/* epon_mac_reset / an7581_epon_mac_logic_reset */
+#define EPON_MAC_LOGIC_RST_1	0x1EC
+#define EPON_MAC_LOGIC_RST_2	0x200
+#define EPON_IPG_CFG		0x204	/* an7581_epon_set_ipg */
+#define EPON_EARLY_WAKEUP	0x280	/* epon_early_wakeup_expires */
+#define EPON_DYGASP_CFG		0x2AC	/* an7581_epon_set/get_dygasp_* */
+#define EPON_DPOE_DECRYPT_KEY_0	0x350	/* an7581_epon_set_dpoe_decrypt_llid_key */
+#define EPON_DPOE_DECRYPT_KEY_1	0x360
+#define EPON_DPOE_DECRYPT_KEY_2	0x364
+#define EPON_OLT_MAC_ADDR_0	0x390	/* an7581_epon_get_olt_mac_address */
+#define EPON_OLT_MAC_ADDR_1	0x394
+#define EPON_SNIFFER_CFG		0x400	/* an7581_epon_set_sniffer */
+#define EPON_BAND_UTIL_0		0x450	/* an7581_epon_set_band_utilization / tx_rate_analyze */
+/* 0x6510..0x6680 (== 0x510..0x680 block-relative) are 10G-EPON MIB counters
+ * (an7581_epon_get_debug_statistic_count); left as a range, individual counters TBD. */
+
+/* key bit-fields (read from firmware orr/and immediates; TBD on hardware) */
+#define  EPON_GLB_MAC_SW_RST	XP_BIT(4)	/* EPON_GLB_CFG: MAC soft-reset */
+#define  EPON_INT_DISCV_GATE	XP_BIT(0)	/* EPON_INT_EN/STATUS (EN7523 name) */
+#define  EPON_INT_LLID_RGST(n)	XP_BIT(1 + (n))	/* LLID n registration int (EN7523) */
+#define  EPON_LLID_KEY_VLD	XP_BIT(31)	/* EPON_LLID_KEY_*: key valid (0x80000000) */
+#define  EPON_MPCP_TO_MASK	0x3ff		/* EPON_MPCP_TIMEOUT_10G value field (10 bits) */
+
 /* Upstream physical-layer overhead (programmed from Upstream_Overhead PLOAM) */
 #define G_PLOu_OVERHEAD		GPON_REG(0x4090)	/* plou_overhead[7:0] */
 #define G_PLOu_GUARD_BIT	GPON_REG(0x4094)	/* guard_bit[7:0] */

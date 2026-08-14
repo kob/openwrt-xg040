@@ -26,6 +26,57 @@
 #include <linux/io.h>
 #include "xpon.h"
 
+/* 10G-EPON (XEPON) MAC bring-up skeleton.
+ *
+ * Register offsets/bits come from disassembling xpon_10g.ko (an7581_epon_*,
+ * epon_*) cross-checked with the open-source EN7523 airoha_xpon.c EPON map
+ * (see xpon.h). This is the STATIC / hardware part of init; the protocol
+ * state (LLID assignment, OLT MAC, unicast/encrypt keys, MPCP discovery &
+ * registration, DBA report, OAM keepalive) is driven by the OLT at runtime and
+ * is LEFT AS TODO. NOT compiled / NOT hardware-verified. */
+static int xpon_epon_init(struct xpon_dev *xp)
+{
+	void __iomem *ep = xp->mac2;
+	u32 v;
+
+	if (!ep) {
+		dev_warn(xp->dev, "XEPON: EPON sub-block (xp->mac2) unmapped; cannot init\n");
+		return -ENODEV;
+	}
+
+	/* 1) MAC soft-reset pulse (EPON_GLB_CFG bit4, per EN7523 airoha_xpon.c) */
+	v = xpon_readl(ep, EPON_GLB_CFG);
+	xpon_writel(ep, EPON_GLB_CFG, v | EPON_GLB_MAC_SW_RST);
+	udelay(10);
+	v = xpon_readl(ep, EPON_GLB_CFG);
+	xpon_writel(ep, EPON_GLB_CFG, v & ~EPON_GLB_MAC_SW_RST);
+	udelay(10);
+
+	/* 2) Default MPCP timeout (10-bit field, EPON_MPCP_TO_MASK) */
+	xpon_writel(ep, EPON_MPCP_TIMEOUT_10G, 0x3ff & EPON_MPCP_TO_MASK); /* TODO: real value */
+
+	/* 3) Default queue threshold (an7581_epon_set_queue_threshold_cfg, 0x12c) */
+	xpon_writel(ep, EPON_QUEUE_THRESHOLD_CFG, 0x0); /* TODO: real threshold */
+
+	/* 4) Enable interrupts: discovery gate + per-LLID registration */
+	xpon_writel(ep, EPON_INT_EN,
+		    EPON_INT_DISCV_GATE |
+		    EPON_INT_LLID_RGST(0) | EPON_INT_LLID_RGST(1) |
+		    EPON_INT_LLID_RGST(2) | EPON_INT_LLID_RGST(3) |
+		    EPON_INT_LLID_RGST(4) | EPON_INT_LLID_RGST(5) |
+		    EPON_INT_LLID_RGST(6) | EPON_INT_LLID_RGST(7));
+
+	/* TODO (runtime, driven by OLT via MPCP):
+	 *   - epon_llid_enable(): EPON_PENDING_GNT_NUM / EPON_LLID_DSCVRY_CTRL
+	 *   - epon_set_llid_regs_mac_address(): EPON_LLID_MAC_ADDR_0/1
+	 *   - an7581_epon_set_llid_key(): EPON_LLID_KEY_0/1 (+EPON_LLID_KEY_VLD)
+	 *   - an7581_epon_set_dpoe_decrypt/encrypt_llid_key(): EPON_DPOE_DECRYPT_KEY_*,
+	 *     EPON_DPOE_ENCRYPT_KEY_CFG, EPON_DPOE_ENCRYPT_LLID_KEY
+	 *   - MPCP discovery/registration FSM, DBA report, OAM keepalive */
+	dev_info(xp->dev, "XEPON: static MAC init done (reset+MPCP-to+Q-thr+intr); LLID/key/MPCP-FSM TODO\n");
+	return 0;
+}
+
 int XPON_PHY_SET_MODE(enum xpon_mode mode)
 {
 	struct xpon_dev *xp = g_xp;
@@ -88,20 +139,20 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 		return 0;
 
 	case XPON_MODE_XEPON:
-		/* 10G-EPON (XEPON, IEEE 802.3av) reuses the SAME 10G PON MAC block
-		 * (xgspon_reg = mac + 0x5000 = 0x1fb65000) as XGS-PON. The two 10G modes
-		 * differ only in MAC framing: 10G-EPON uses MPCP discovery/registration
-		 * (LLID) + OAM + DBA report, whereas XGS-PON uses GEM/OMCI. The framing
-		 * is selected by the stock firmware's doEponSetMode() register writes
-		 * inside xpon_10g.ko. The XEPON register map (MPCP/LLID/OAM/DBA/encryption)
-		 * has NOT been extracted from xpon_10g.ko yet, so we only record the mode
-		 * and defer MAC programming. The generic serdes PHY does not accept a
-		 * 10G-EPON submode and the SCU WAN_CONF field encodes only GPON/EPON, so
-		 * both are left untouched (cf. XGS-PON). */
+		/* 10G-EPON (XEPON, IEEE 802.3av) uses its OWN sub-block at +0x6000
+		 * inside the PON MAC window: xp->mac2 == DTS reg[1] == 0x1fb66000. This
+		 * is DISTINCT from the XGS-PON sub-block at +0x5000 (xp->mac3 /
+		 * xgspon_reg); the two 10G modes share only the 64KB window and the
+		 * serdes lane, differing in MAC framing (XEPON = MPCP/LLID/OAM/DBA;
+		 * XGS-PON = GEM/OMCI). The firmware selects framing via doEponSetMode()
+		 * in xpon_10g.ko (a small GPON-block mode register, offset 0x14..0x20).
+		 * The XEPON register map (MPCP/LLID/OAM/DBA/encryption) HAS been
+		 * extracted from xpon_10g.ko and added to xpon.h; drive the static MAC
+		 * bring-up now, deferring the OLT-driven runtime state. The generic
+		 * serdes PHY does not accept a 10G-EPON submode and the SCU WAN_CONF
+		 * field encodes only GPON/EPON, so both are left untouched (cf. XGS-PON). */
 		xp->mode = mode;
-		dev_info(xp->dev,
-			 "10G-EPON (XEPON) mode selected; 10G MAC block at 0x1fb65000 shared with XGS-PON. XEPON register map TBD (extract from xpon_10g.ko)\n");
-		return 0;
+		return xpon_epon_init(xp);
 
 	default:
 		dev_err(xp->dev, "xPON mode %d not supported\n", mode);
