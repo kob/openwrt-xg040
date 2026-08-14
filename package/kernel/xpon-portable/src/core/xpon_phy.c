@@ -26,39 +26,115 @@
 #include <linux/io.h>
 #include "xpon.h"
 
-/* 10G-EPON (XEPON) MAC bring-up skeleton.
+/* 10G-EPON (XEPON) MAC bring-up.
  *
- * Register offsets/bits come from disassembling xpon_10g.ko (an7581_epon_*,
- * epon_*) cross-checked with the open-source EN7523 airoha_xpon.c EPON map
- * (see xpon.h). This is the STATIC / hardware part of init; the protocol
- * state (LLID assignment, OLT MAC, unicast/encrypt keys, MPCP discovery &
- * registration, DBA report, OAM keepalive) is driven by the OLT at runtime and
- * is LEFT AS TODO. NOT compiled / NOT hardware-verified. */
+ * The EPON sub-block (xp->mac2 == DTS reg[1] == 0x1fb66000) is the SAME IP the
+ * open-source EN7523 airoha_xpon.c drives in 1G EPON mode. 10G-EPON (XEPON) is
+ * that block switched to 10G framing via EPON_GLB_CFG[GLB_MODE_SEL]. The static
+ * bring-up below is ported 1:1 from that driver's epon_sw_reset() + epon_hw_init()
+ * (the authoritative sequence for this IP); only the GLB_MODE_SEL bit differs for
+ * XEPON. The OLT-driven runtime state (LLID assignment, OLT MAC, unicast/encrypt
+ * keys, MPCP discovery & registration FSM, DBA report, OAM keepalive) is LEFT AS
+ * TODO and is meant to be driven by the MPCP state machine. NOT compiled / NOT
+ * hardware-verified. */
+
+/* Program one 128-bit security key for a given LLID (1G EPON indirect key).
+ * Ported from open-source airoha_xpon.c epon_set_security_key(). The runtime
+ * MPCP FSM calls this with the key negotiated with the OLT. */
+static void xpon_epon_set_security_key(struct xpon_dev *xp, int llid_idx,
+				      int key_idx, const u8 key[16])
+{
+	void __iomem *ep = xp->mac2;
+	int dw;
+
+	if (!ep)
+		return;
+	for (dw = 0; dw < 4; dw++) {
+		u32 cfg = EPON_SEC_KEY_WRITE_CMD |
+			  ((llid_idx & 7) << EPON_SEC_KEY_LLID_SHIFT) |
+			  ((key_idx  & 1) << EPON_SEC_KEY_IDX_SHIFT)  |
+			  ((dw       & 3) << EPON_SEC_KEY_DW_SHIFT);
+		u32 data = ((u32)key[dw * 4 + 0] << 24) |
+			   ((u32)key[dw * 4 + 1] << 16) |
+			   ((u32)key[dw * 4 + 2] <<  8) |
+			   ((u32)key[dw * 4 + 3]);
+
+		xpon_writel(ep, EPON_SECURITY_KEY_CFG, cfg);
+		xpon_writel(ep, EPON_SECURITY_KEY_DATA, data);
+	}
+}
+
+/* 10G-XEPON LLID key (an7581_epon_set_llid_key): EPON_LLID_KEY_0/1 with
+ * EPON_LLID_KEY_VLD. Runtime MPCP FSM calls this. Bit-field TBD on hardware. */
+static void xpon_epon_set_llid_key(struct xpon_dev *xp, u32 key_lo, u32 key_hi)
+{
+	void __iomem *ep = xp->mac2;
+
+	if (!ep)
+		return;
+	xpon_writel(ep, EPON_LLID_KEY_0, key_lo);
+	xpon_writel(ep, EPON_LLID_KEY_1, key_hi | EPON_LLID_KEY_VLD);
+}
+
 static int xpon_epon_init(struct xpon_dev *xp)
 {
 	void __iomem *ep = xp->mac2;
 	u32 v;
+	int i;
+	u8 zero_key[16] = {};
 
 	if (!ep) {
 		dev_warn(xp->dev, "XEPON: EPON sub-block (xp->mac2) unmapped; cannot init\n");
 		return -ENODEV;
 	}
 
-	/* 1) MAC soft-reset pulse (EPON_GLB_CFG bit4, per EN7523 airoha_xpon.c) */
+	/* 1) MAC soft-reset pulse (EPON_GLB_CFG bit4) + RPT_TXPRI_CTRL, then
+	 *    post-reset timing parameters. Ported from epon_sw_reset(). */
 	v = xpon_readl(ep, EPON_GLB_CFG);
 	xpon_writel(ep, EPON_GLB_CFG, v | EPON_GLB_MAC_SW_RST);
 	udelay(10);
 	v = xpon_readl(ep, EPON_GLB_CFG);
 	xpon_writel(ep, EPON_GLB_CFG, v & ~EPON_GLB_MAC_SW_RST);
 	udelay(10);
+	v |= EPON_GLB_RPT_TXPRI_CTRL;
+	xpon_writel(ep, EPON_GLB_CFG, v);
 
-	/* 2) Default MPCP timeout (10-bit field, EPON_MPCP_TO_MASK) */
-	xpon_writel(ep, EPON_MPCP_TIMEOUT_10G, 0x3ff & EPON_MPCP_TO_MASK); /* TODO: real value */
+	xpon_writel(ep, EPON_GRD_THRSHLD,      EPON_GRD_THRSHLD_DEFAULT);
+	xpon_writel(ep, EPON_TRX_ADJUST_TIME1, EPON_TRX_ADJUST_TIME1_DEF);
+	xpon_writel(ep, EPON_TRX_ADJUST_TIME2, EPON_TRX_ADJUST_TIME2_DEF);
+	xpon_writel(ep, EPON_TXFETCH_CFG,      EPON_TXFETCH_DEFAULT);
 
-	/* 3) Default queue threshold (an7581_epon_set_queue_threshold_cfg, 0x12c) */
-	xpon_writel(ep, EPON_QUEUE_THRESHOLD_CFG, 0x0); /* TODO: real threshold */
+	/* 2) Select 1G EPON vs 10G-EPON (XEPON) framing. GLB_MODE_SEL=1 puts the
+	 *    block into 10G-XEPON mode (doEponSetMode's 10G path). */
+	if (xp->mode == XPON_MODE_XEPON)
+		v |= EPON_GLB_MODE_SEL;
+	else
+		v &= ~EPON_GLB_MODE_SEL;
+	xpon_writel(ep, EPON_GLB_CFG, v);
 
-	/* 4) Enable interrupts: discovery gate + per-LLID registration */
+	/* 3) Stop MBI, forward MPCP/FCS, enable discovery burst (epon_hw_init). */
+	v = xpon_readl(ep, EPON_GLB_CFG);
+	v |= EPON_GLB_TXMBI_STOP | EPON_GLB_RXMBI_STOP;
+	v |= EPON_GLB_MPCP_FWD | EPON_GLB_FCS_ERR_FWD | EPON_GLB_DISCV_BURST_EN;
+	xpon_writel(ep, EPON_GLB_CFG, v);
+
+	/* 4) Layer-2 timing / grant parameters. */
+	xpon_writel(ep, EPON_PENDING_GNT_NUM,    EPON_PENDING_GNT_DEFAULT);
+	xpon_writel(ep, EPON_MPCP_TIMEOUT_INTVL, EPON_MPCP_TIMEOUT_DEFAULT);
+	xpon_writel(ep, EPON_RPT_TIMEOUT_INTVL,  EPON_RPT_TIMEOUT_DEFAULT);
+	xpon_writel(ep, EPON_MAX_FUTURE_GNT,     EPON_MAX_FUTURE_GNT_DEFAULT);
+	xpon_writel(ep, EPON_MIN_PROC_TIME,      EPON_MIN_PROC_TIME_DEFAULT);
+	xpon_writel(ep, EPON_LASER_ONOFF_TIME,   EPON_LASER_ONOFF_DEFAULT);
+	xpon_writel(ep, EPON_TX_CAL_CNST,        EPON_TX_CAL_CNST_DEFAULT);
+
+	/* 5) Hardware dying gasp detection (magic value per ref). */
+	xpon_writel(ep, EPON_DYINGGSP_CFG, EPON_DYINGGSP_CFG_HW_ENABLE);
+
+	/* 6) Clear all LLID security keys (epon_hw_init loop). */
+	for (i = 0; i < EPON_MAX_LLID; i++)
+		xpon_epon_set_security_key(xp, i, 0, zero_key);
+
+	/* 7) Enable interrupts: discovery gate + per-LLID registration. */
 	xpon_writel(ep, EPON_INT_EN,
 		    EPON_INT_DISCV_GATE |
 		    EPON_INT_LLID_RGST(0) | EPON_INT_LLID_RGST(1) |
@@ -67,16 +143,19 @@ static int xpon_epon_init(struct xpon_dev *xp)
 		    EPON_INT_LLID_RGST(6) | EPON_INT_LLID_RGST(7));
 
 	/* TODO (runtime, driven by OLT via MPCP):
-	 *   - epon_llid_enable(): EPON_PENDING_GNT_NUM / EPON_LLID_DSCVRY_CTRL
-	 *   - epon_set_llid_regs_mac_address(): EPON_LLID_MAC_ADDR_0/1
-	 *   - an7581_epon_set_llid_key(): EPON_LLID_KEY_0/1 (+EPON_LLID_KEY_VLD)
-	 *   - an7581_epon_set_dpoe_decrypt/encrypt_llid_key(): EPON_DPOE_DECRYPT_KEY_*,
-	 *     EPON_DPOE_ENCRYPT_KEY_CFG, EPON_DPOE_ENCRYPT_LLID_KEY
-	 *   - MPCP discovery/registration FSM, DBA report, OAM keepalive */
-	dev_info(xp->dev, "XEPON: static MAC init done (reset+MPCP-to+Q-thr+intr); LLID/key/MPCP-FSM TODO\n");
+	 *   - LLID assignment + OLT MAC (EPON_LLID_MAC_ADDR_0/1); discovery/
+	 *     registration FSM driving EPON_LLID_DSCVRY_CTRL
+	 *     (EPON_DSCVRY_MPCP_REG_REQ / _ACK).
+	 *   - per-LLID unicast/encrypt keys via xpon_epon_set_security_key()
+	 *     (1G) and xpon_epon_set_llid_key() (10G-XEPON DPOE key).
+	 *   - DBA report, OAM keepalive, MPCP timeout handling.
+	 * The 10G line-rate / serdes PCS for XEPON is configured by the stock
+	 * firmware's own serdes path (out of scope for this MAC driver). */
+	dev_info(xp->dev, "XEPON: EPON MAC init done (mode=%s, GLB_CFG=0x%08x)\n",
+		 (xp->mode == XPON_MODE_XEPON) ? "10G-EPON" : "1G-EPON",
+		 xpon_readl(ep, EPON_GLB_CFG));
 	return 0;
 }
-
 int XPON_PHY_SET_MODE(enum xpon_mode mode)
 {
 	struct xpon_dev *xp = g_xp;
@@ -144,14 +223,32 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 		 * is DISTINCT from the XGS-PON sub-block at +0x5000 (xp->mac3 /
 		 * xgspon_reg); the two 10G modes share only the 64KB window and the
 		 * serdes lane, differing in MAC framing (XEPON = MPCP/LLID/OAM/DBA;
-		 * XGS-PON = GEM/OMCI). The firmware selects framing via doEponSetMode()
-		 * in xpon_10g.ko (a small GPON-block mode register, offset 0x14..0x20).
-		 * The XEPON register map (MPCP/LLID/OAM/DBA/encryption) HAS been
-		 * extracted from xpon_10g.ko and added to xpon.h; drive the static MAC
-		 * bring-up now, deferring the OLT-driven runtime state. The generic
-		 * serdes PHY does not accept a 10G-EPON submode and the SCU WAN_CONF
-		 * field encodes only GPON/EPON, so both are left untouched (cf. XGS-PON). */
+		 * XGS-PON = GEM/OMCI).
+		 *
+		 * Hardware mode switch (correction to earlier notes): doEponSetMode()
+		 * in xpon_10g.ko does NOT write a GPON-block mode register. The MAC
+		 * framing switch lives in THIS EPON block:
+		 *   - EPON_GLB_CFG[GLB_MODE_SEL] (bit0) is the IP's documented MODE_SEL
+		 *     bit and is the most likely 1G-EPON vs 10G-XEPON selector; TBD on
+		 *     hardware (the EN7523 open-source driver is 1G-only and never sets
+		 *     it). xpon_epon_init() sets it for XPON_MODE_XEPON pending confirm.
+		 *   - the rest of doEponSetMode() dispatches through UNION_IC_FUNCTION_HOOK
+		 *     and calls eponSetRateMode(); the 10G line-rate / serdes PCS is
+		 *     configured by the stock firmware's own serdes path (out of scope
+		 *     here).
+		 * The open-source EN7523 SCU WAN mux only encodes GPON(0x00)/EPON(0x01),
+		 * so 10G-EPON reuses the EPON WAN path (set below). */
 		xp->mode = mode;
+
+		/* Select the PON WAN line path in the SCU: 10G-EPON shares the EPON
+		 * WAN mux (no 10G SCU value exists). Optional if no SCU phandle. */
+		if (xp->scu)
+			regmap_update_bits(xp->scu, XPON_SCU_WAN_CONF,
+					   XPON_SCU_WAN_MODE_MASK,
+					   XPON_SCU_WAN_MODE_EPON);
+		else
+			dev_warn(xp->dev, "no SCU mapped; XEPON WAN path select skipped\n");
+
 		return xpon_epon_init(xp);
 
 	default:

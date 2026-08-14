@@ -460,12 +460,67 @@ struct xpon_dev {
 /* 0x6510..0x6680 (== 0x510..0x680 block-relative) are 10G-EPON MIB counters
  * (an7581_epon_get_debug_statistic_count); left as a range, individual counters TBD. */
 
-/* key bit-fields (read from firmware orr/and immediates; TBD on hardware) */
+/* Global config (EPON_GLB_CFG) bit-fields. The 1G EPON layout is taken
+ * verbatim from the open-source EN7523 airoha_xpon.c (the same EPON IP); the
+ * GLB_CFG_MODE_SEL bit (0) is the 1G/10G selector that firmware doEponSetMode
+ * relies on to switch this block into XEPON (10G-EPON) framing. */
+#define  EPON_GLB_MODE_SEL	XP_BIT(0)	/* 0=1G EPON, 1=10G-EPON (XEPON) */
+#define  EPON_GLB_RPT_TXPRI_CTRL	XP_BIT(1)
 #define  EPON_GLB_MAC_SW_RST	XP_BIT(4)	/* EPON_GLB_CFG: MAC soft-reset */
-#define  EPON_INT_DISCV_GATE	XP_BIT(0)	/* EPON_INT_EN/STATUS (EN7523 name) */
-#define  EPON_INT_LLID_RGST(n)	XP_BIT(1 + (n))	/* LLID n registration int (EN7523) */
-#define  EPON_LLID_KEY_VLD	XP_BIT(31)	/* EPON_LLID_KEY_*: key valid (0x80000000) */
-#define  EPON_MPCP_TO_MASK	0x3ff		/* EPON_MPCP_TIMEOUT_10G value field (10 bits) */
+#define  EPON_GLB_TXMBI_STOP	XP_BIT(8)
+#define  EPON_GLB_RXMBI_STOP	XP_BIT(9)
+#define  EPON_GLB_FCS_ERR_FWD	XP_BIT(17)
+#define  EPON_GLB_MPCP_FWD	XP_BIT(22)
+#define  EPON_GLB_DISCV_BURST_EN	XP_BIT(23)
+
+/* Interrupt status/enable (EPON_INT_STATUS / EPON_INT_EN) bit-fields */
+#define  EPON_INT_DISCV_GATE	XP_BIT(0)	/* discovery gate received */
+#define  EPON_INT_LLID_RGST(n)	XP_BIT(1 + (n))	/* LLID n REGISTER frame received */
+#define  EPON_INT_REG_REQ_DONE	XP_BIT(24)	/* REGISTER_REQUEST sent by HW */
+#define  EPON_INT_REG_ACK_DONE	XP_BIT(25)	/* REGISTER_ACK sent by HW */
+
+/* LLID discovery control (EPON_LLID_DSCVRY_CTRL) bit-fields */
+#define  EPON_DSCVRY_MPCP_REG_REQ	XP_BIT(30)	/* send REGISTER_REQUEST */
+#define  EPON_DSCVRY_MPCP_ACK	(3U << 30)	/* send REGISTER_ACK */
+#define  EPON_DSCVRY_MPCP_NORMAL	XP_BIT(31)
+#define  EPON_DSCVRY_CMD_DONE	XP_BIT(16)
+
+/* Indirect MAC-address register (EPON_MAC_ADDR_CFG) bit-fields */
+#define  EPON_MAC_ADDR_RWCMD	XP_BIT(31)	/* write 1 to trigger write */
+#define  EPON_MAC_ADDR_DONE	XP_BIT(16)	/* 1=busy */
+#define  EPON_MAC_ADDR_LLID_SHIFT	1
+#define  EPON_MAC_ADDR_DW_IDX	XP_BIT(0)
+
+/* Security-key indirect registers (EPON_SECURITY_KEY_CFG / _DATA) bit-fields.
+ * Ported from open-source airoha_xpon.c epon_set_security_key(). */
+#define  EPON_SEC_KEY_WRITE_CMD	XP_BIT(31)
+#define  EPON_SEC_KEY_LLID_SHIFT	24
+#define  EPON_SEC_KEY_IDX_SHIFT	16
+#define  EPON_SEC_KEY_DW_SHIFT	8
+
+/* 10G-XEPON LLID key (EPON_LLID_KEY_0/1, an7581_epon_set_llid_key) bit-field */
+#define  EPON_LLID_KEY_VLD	XP_BIT(31)	/* key valid (0x80000000) */
+
+/* MPCP timeout 10G field (EPON_MPCP_TIMEOUT_10G) */
+#define  EPON_MPCP_TO_MASK	0x3ff
+
+/* Number of LLIDs the EPON MAC supports (open-source EPON_MAX_LLID) */
+#define EPON_MAX_LLID		8
+
+/* Static-bring-up default values (open-source airoha_xpon.c). These are the
+ * values the stock 1G EPON path writes; the 10G-XEPON block reuses them. */
+#define EPON_PENDING_GNT_DEFAULT	0x40
+#define EPON_MPCP_TIMEOUT_DEFAULT	0x03B9ACA0
+#define EPON_RPT_TIMEOUT_DEFAULT		0x002FAF08
+#define EPON_MAX_FUTURE_GNT_DEFAULT	0x03B9ACA0
+#define EPON_MIN_PROC_TIME_DEFAULT	0x400
+#define EPON_LASER_ONOFF_DEFAULT		0x2020
+#define EPON_TX_CAL_CNST_DEFAULT		0x2612040C
+#define EPON_TXFETCH_DEFAULT		0x202403E8
+#define EPON_TRX_ADJUST_TIME1_DEF		0x004FFFF1
+#define EPON_TRX_ADJUST_TIME2_DEF		0x6
+#define EPON_GRD_THRSHLD_DEFAULT		0x10
+#define EPON_DYINGGSP_CFG_HW_ENABLE	0x80000102
 
 /* Upstream physical-layer overhead (programmed from Upstream_Overhead PLOAM) */
 #define G_PLOu_OVERHEAD		GPON_REG(0x4090)	/* plou_overhead[7:0] */
