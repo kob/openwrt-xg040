@@ -380,6 +380,7 @@ static int xpon_probe(struct platform_device *pdev)
 	/* map the three XPON MAC register regions */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	xp->mac = devm_ioremap_resource(&pdev->dev, res);
+	xp->xgspon_reg = xp->mac + XPON_XGSPON_REG_OFFSET;
 	if (IS_ERR(xp->mac))
 		return PTR_ERR(xp->mac);
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
@@ -398,6 +399,22 @@ static int xpon_probe(struct platform_device *pdev)
 	xp->serdes = devm_ioremap(&pdev->dev, SERDES_COMMON_BASE, SERDES_COMMON_SIZE);
 	xp->xpon_usxgmii = devm_ioremap(&pdev->dev, XPON_USXGMII_BASE, XPON_USXGMII_SIZE);
 
+	/* Optional xPON SERDES/PCS generic PHY used for protocol-mode switching.
+	 * If the kernel ships drivers/phy/airoha/phy-airoha-xpon.c, the PCS line
+	 * rate is reconfigured through it (phy-names "xpon"); otherwise the switch
+	 * is delegated to the mainline PCS driver and a warning is logged. */
+	xp->xpon_serdes_phy = devm_phy_optional_get(&pdev->dev, "xpon");
+	if (IS_ERR(xp->xpon_serdes_phy)) {
+		dev_warn(&pdev->dev, "xPON serdes PHY optional-get failed: %ld\n",
+			 PTR_ERR(xp->xpon_serdes_phy));
+		xp->xpon_serdes_phy = NULL;
+	}
+	xp->scu = syscon_regmap_lookup_by_phandle(pdev->dev.of_node, "airoha,scu");
+	if (IS_ERR(xp->scu)) {
+		dev_warn(&pdev->dev, "SCU syscon not found; WAN path select disabled\n");
+		xp->scu = NULL;
+	}
+
 	/* Allocate the GPON activation/private state. Sub-modules (xpon_gpon.c,
 	 * xpon_ploam.c, xpon_act.c) reference xp->gpon, so it must exist before
 	 * any of the gpon_*_init() calls below. */
@@ -412,7 +429,10 @@ static int xpon_probe(struct platform_device *pdev)
 	atomic_set(&xp->gpon->to1_expiry_cnt, GPON_TO1_RESET_CNT);
 	atomic_set(&xp->gpon->hw_reset_cnt, 0);
 
-	xp->mode = XPON_MODE_UNKNOWN;
+	/* This driver currently implements the GPON data path (GEM sniffer + QDMA +
+	 * OMCC). Default the protocol mode to GPON; EPON can be selected at runtime
+	 * once its MAC engine is ported, XG(S)-PON / 10G-EPON are not supported. */
+	xp->mode = XPON_MODE_GPON;
 	ret = xpon_hw_init(xp);
 	if (ret)
 		return ret;

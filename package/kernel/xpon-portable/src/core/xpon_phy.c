@@ -28,13 +28,91 @@
 
 int XPON_PHY_SET_MODE(enum xpon_mode mode)
 {
-	if (g_xp)
-		g_xp->mode = mode;
+	struct xpon_dev *xp = g_xp;
+	int submode, ret = 0;
+	u32 wan_val;
 
-	/* Protocol mode is owned by the SERDES/PCS block (pon_pcs), not the GPON
-	 * MAC window. The mainline airoha,an7581-pcs-pon driver programmes it from
-	 * the &pon_pcs phandle. Nothing to do here beyond recording the request. */
+	if (!xp)
+		return -ENODEV;
+
+	/* Only GPON and EPON are supported by the EN7581 PON serdes/PCS today.
+	 * The vendor airoha_eth_set_xpon_mode() likewise rejects anything other
+	 * than GPON/EPON, and the XG(S)-PON MAC engine is not yet ported (report
+	 * §2/§11). 10G-EPON additionally needs different BOSA optics, so it is out
+	 * of scope for this hardware. */
+	switch (mode) {
+	case XPON_MODE_GPON:
+		submode = XPON_PHY_SUBMODE_GPON;
+		wan_val = XPON_SCU_WAN_MODE_GPON;
+		break;
+	case XPON_MODE_EPON:
+		submode = XPON_PHY_SUBMODE_EPON;
+		wan_val = XPON_SCU_WAN_MODE_EPON;
+		break;
+	case XPON_MODE_XGPON:
+		/* XGS-PON (10G symmetric) IS supported by the hardware and the stock
+		 * firmware: the XGS-PON MAC engine lives at base+0x5000 (xgspon_reg,
+		 * XGSPON_REG_OFFSET in airoha_xpon.c) and the stock xpon.ko programmes
+		 * it at runtime. Caveats implemented here:
+		 *   - The EN7581 serdes PHY driver (phy-airoha-xpon, derived from
+		 *     EN7523/EN7571) only accepts GPON/EPON submodes; the 10G line
+		 *     rate for XGS-PON is configured by the stock firmware own serdes
+		 *     path, so we deliberately do NOT call the generic PHY.
+		 *   - The SCU WAN_CONF field (EN7523 layout) defines only GPON/EPON;
+		 *     the stock firmware selects XGS-PON WAN via a different (econet)
+		 *     SCU path, so we leave SCU untouched.
+		 *   - The GEM sniffer / OMCI extraction registers for the XGS-PON block
+		 *     (0x5000) are NOT yet extracted from the firmware regmap
+		 *     (bitfields.json covers only the GPON window), so GEM bridging
+		 *     will not work until those are ported. Tracked as a follow-up. */
+		xp->mode = mode;
+		dev_info(xp->dev, "XGS-PON mode selected (MAC engine at 0x5000); serdes via stock firmware path, GEM/OMCI porting TBD\n");
+		return 0;
+	}
+
+	/* 1) Drive the PON serdes/PCS line rate + PCS mode. The generic PHY bound
+	 *    to the phy-airoha-xpon driver performs the actual SERDES equalisation
+	 *    and PCS link training (mirrors airoha_xpon_phy_start()). Optional: if
+	 *    the kernel build has no phy-airoha-xpon, this is NULL and the switch
+	 *    is delegated to the mainline PCS driver. */
+	if (xp->xpon_serdes_phy) {
+		if (!xp->serdes_phy_init) {
+			ret = phy_init(xp->xpon_serdes_phy);
+			if (ret)
+				goto out;
+			xp->serdes_phy_init = true;
+		}
+		ret = phy_set_mode_ext(xp->xpon_serdes_phy,
+					PHY_MODE_ETHERNET, submode);
+		if (ret)
+			goto out;
+		if (!xp->serdes_phy_powered) {
+			ret = phy_power_on(xp->xpon_serdes_phy);
+			if (ret)
+				goto out;
+			xp->serdes_phy_powered = true;
+		}
+	} else {
+		dev_warn(xp->dev, "no xPON serdes PHY bound; PCS line-rate switch skipped\n");
+	}
+
+	/* 2) Select the PON WAN line path in the SCU (GPON=0x00 / EPON=0x01).
+	 *    Offset EN7523_SCU_WAN_CONF=0x070 within the airoha,en7581-scu syscon;
+	 *    the macro name is inherited from the EN7523 SCU but the field is the
+	 *    same on EN7581. Optional: delegated if no SCU phandle is present. */
+	if (xp->scu) {
+		regmap_update_bits(xp->scu, XPON_SCU_WAN_CONF,
+				   XPON_SCU_WAN_MODE_MASK, wan_val);
+	} else {
+		dev_warn(xp->dev, "no SCU mapped; WAN path select skipped\n");
+	}
+
+	xp->mode = mode;
 	return 0;
+
+out:
+	dev_err(xp->dev, "xPON serdes PHY mode switch to %d failed: %d\n", mode, ret);
+	return ret;
 }
 
 void pon_phy_reset(void)

@@ -24,12 +24,17 @@
 #include <linux/workqueue.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/phy/phy.h>
+#include <linux/regmap.h>
+#include <linux/mfd/syscon.h>
+#include <linux/bits.h>
 
 #include "xpon_ioctl.h"
 
 /* ----------------------- Register bases (from DTS) ----------------------- */
 #define XPON_MAC_BASE		0x1fb64000	/* reg[0] */
 #define XPON_MAC_SIZE		0x3e8
+#define XPON_XGSPON_REG_OFFSET	0x5000	/* XGS-PON MAC engine block within PON MAC window (XGSPON_REG_OFFSET in airoha_xpon.c) */
 #define XPON_MAC2_BASE		0x1fb66000	/* reg[1] */
 #define XPON_MAC2_SIZE		0x23c
 #define XPON_MAC3_BASE		0x1fb65000	/* reg[2] */
@@ -48,6 +53,21 @@
 
 #define XPON_USXGMII_BASE	0x1fa80000
 #define XPON_USXGMII_SIZE	0xff
+
+/* PON protocol-mode switching (mirrors airoha_kernel airoha_xpon.c).
+ * The actual line-rate / PCS reconfiguration is performed by the generic
+ * SERDES PHY (drivers/phy/airoha/phy-airoha-xpon.c) via phy_set_mode_ext(),
+ * and the SoC WAN line path is selected in the SCU. Only GPON and EPON are
+ * supported; XG(S)-PON and 10G-EPON need a MAC engine + BOSA optics that are
+ * not yet ported (see report §2/§11) -- vendor airoha_eth_set_xpon_mode() also
+ * rejects anything other than GPON/EPON. */
+#define XPON_SCU_WAN_CONF\t\t0x070\t/* offset in airoha,en7581-scu syscon */
+#define XPON_SCU_WAN_MODE_MASK\tGENMASK(7, 0)
+#define XPON_SCU_WAN_MODE_GPON\t0x00
+#define XPON_SCU_WAN_MODE_EPON\t0x01
+/* submodes for phy_set_mode_ext(phy, PHY_MODE_ETHERNET, submode) */
+#define XPON_PHY_SUBMODE_GPON\t0
+#define XPON_PHY_SUBMODE_EPON\t1
 
 /* Interrupt lines from DTS (GIC SPI numbers). */
 #define XPON_IRQ_0		42	/* 0x2a */
@@ -105,6 +125,17 @@ struct xpon_dev {
 
 	/* Airoha/EN7581 QDMA engine private state (xpon_qdma.c) */
 	void		*qdma;
+
+	/* Protocol-mode switching resources (xpon_phy.c). Both are optional:
+	 * if the kernel ships drivers/phy/airoha/phy-airoha-xpon.c the PCS
+	 * line-rate is reconfigured via xpon_serdes_phy; the SCU selects the WAN
+	 * line path. Absent => the switch is delegated to the mainline PCS driver
+	 * and a warning is logged. */
+	struct phy		*xpon_serdes_phy;
+	struct regmap		*scu;
+	void __iomem		*xgspon_reg;	/* XGS-PON MAC engine (mac + 0x5000) */
+	bool			serdes_phy_init;
+	bool			serdes_phy_powered;
 };
 
 /* ----------------------- GPON MAC registers ---------------------------------
