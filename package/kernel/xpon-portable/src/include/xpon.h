@@ -32,9 +32,17 @@
 #include "xpon_ioctl.h"
 
 /* ----------------------- Register bases (from DTS) ----------------------- */
-#define XPON_MAC_BASE		0x1fb64000	/* reg[0] */
+#define XPON_MAC_BASE		0x1fb64000	/* reg[0] = GPON sub-block (GPON_REG_OFFSET 0x4000) */
 #define XPON_MAC_SIZE		0x3e8
 #define XPON_XGSPON_REG_OFFSET	0x5000	/* XGS-PON MAC engine block within PON MAC window (XGSPON_REG_OFFSET in airoha_xpon.c) */
+/* The PON MAC window is shared by three sibling sub-blocks (vendor
+ * airoha_xpon.c: GPON_REG_OFFSET 0x4000 / XGSPON_REG_OFFSET 0x5000 /
+ * EPON_REG_OFFSET 0x6000). DTS reg[0] only exposes the GPON sub-block
+ * (0x1fb64000, size 0x3e8), so the XGS-PON sub-block is mapped directly by
+ * the driver at its fixed physical address below -- mac + 0x5000 would land
+ * OUTSIDE the GPON ioremap window and fault. */
+#define XPON_XGS_BLOCK_BASE	(XPON_MAC_BASE + XPON_XGSPON_REG_OFFSET) /* 0x1fb69000 */
+#define XPON_XGS_BLOCK_SIZE	0x2000
 #define XPON_MAC2_BASE		0x1fb66000	/* reg[1] */
 #define XPON_MAC2_SIZE		0x23c
 #define XPON_MAC3_BASE		0x1fb65000	/* reg[2] */
@@ -317,6 +325,24 @@ struct xpon_dev {
 #define G_GEM_TBL_INIT		GPON_REG(0x404c)
 #define  G_GEM_TBL_INIT_START	XP_BIT(0)
 #define  G_GEM_TBL_INIT_DONE	XP_BIT(8)
+
+/* ----------------------- XGS-PON (10G) GEM/OMCI registers ----------------
+ * The XGS-PON MAC engine (xgspon_reg = mac + 0x5000) is a *parallel* of the
+ * GPON MAC engine. vendor airoha_xpon.c places GPON@0x4000 / XGS@0x5000 /
+ * EPON@0x6000 as three sibling sub-blocks inside the one PON MAC window, and
+ * Airoha reuses the identical GEM/OMCI register layout in each sub-block. The
+ * offsets below therefore EQUAL the GPON block's relative offsets (0x040/0x044/
+ * 0x048/0x04c/0x20c); they are spelled out explicitly so the XGS path is
+ * self-documenting and each can be corrected independently on hardware.
+ *
+ *   >>> MIRRORED FROM THE GPON BLOCK -- VERIFY ON XGS-PON HARDWARE <<<
+ * Bit-field meanings are identical to the G_GEM_* / G_OMCI_* definitions
+ * above, so the GPON bit-field macros are reused on the XGS base. */
+#define XGS_GEM_PORT_CFG	0x040	/* == G_GEM_PORT_CFG relative offset */
+#define XGS_GEM_PORT_STS	0x044
+#define XGS_OMCI_ID		0x048
+#define XGS_GEM_TBL_INIT	0x04c
+#define XGS_IDLE_GEM_THLD	0x20c	/* == DBG_IDLE_GEM_THLD relative offset */
 
 /* Upstream physical-layer overhead (programmed from Upstream_Overhead PLOAM) */
 #define G_PLOu_OVERHEAD		GPON_REG(0x4090)	/* plou_overhead[7:0] */

@@ -74,6 +74,23 @@ void gpon_field(u32 off, u32 lo, u32 w, u32 val)
 	xpon_writel(mac, off, XP_SET(xpon_readl(mac, off), lo, w, val));
 }
 
+/* GEM/OMCI register window for the *active* PON mode. The XGS-PON MAC engine
+ * (xgspon_reg = mac + 0x5000) mirrors the GPON engine's GEM/OMCI layout, so in
+ * XGS-PON mode the GEM port table / OMCI channel must be programmed into the
+ * XGS sub-block. The relative offsets are identical (XGS_GEM_PORT_CFG etc.),
+ * only the base differs. */
+static inline bool xpon_gem_is_xgs(void)
+{
+	return g_xp && g_xp->mode == XPON_MODE_XGPON && g_xp->xgspon_reg;
+}
+
+void __iomem *xpon_gem_base(void)
+{
+	if (xpon_gem_is_xgs())
+		return g_xp->xgspon_reg;
+	return gpon_mac();
+}
+
 /* ---------------- ONU SN / Password ----------------
  *
  * Only the SN reaches hardware. The GPON MAC has no password register: G.984.3
@@ -198,7 +215,7 @@ int gpon_program_serial_number(void)
  */
 static int gpon_table_init_one(u32 off, const char *what)
 {
-	void __iomem *mac = gpon_mac();
+	void __iomem *mac = xpon_gem_base();
 	int retry = GPON_TBL_INIT_RETRY;
 
 	if (!mac)
@@ -234,8 +251,9 @@ static int gpon_gem_table_clear_slow(void)
 int gpon_gem_table_init(void)
 {
 	int ret;
+	u32 off = xpon_gem_is_xgs() ? XGS_GEM_TBL_INIT : G_GEM_TBL_INIT;
 
-	ret = gpon_table_init_one(G_GEM_TBL_INIT, "GEM port");
+	ret = gpon_table_init_one(off, "GEM port");
 	if (ret == -ETIMEDOUT)
 		ret = gpon_gem_table_clear_slow();
 
@@ -249,7 +267,9 @@ int gpon_gem_table_init(void)
  */
 int gpon_gem_port_write(u16 gem_port, bool valid, bool encrypt)
 {
-	void __iomem *mac = gpon_mac();
+	void __iomem *mac = xpon_gem_base();
+	u32 cfg_off = xpon_gem_is_xgs() ? XGS_GEM_PORT_CFG : G_GEM_PORT_CFG;
+	u32 sts_off = xpon_gem_is_xgs() ? XGS_GEM_PORT_STS : G_GEM_PORT_STS;
 	int retry = GPON_CMD_RETRY;
 	u32 cfg;
 
@@ -265,10 +285,10 @@ int gpon_gem_port_write(u16 gem_port, bool valid, bool encrypt)
 	if (encrypt)
 		cfg |= G_GEM_CFG_ENCRYPT;
 
-	xpon_writel(mac, G_GEM_PORT_CFG, cfg);
+	xpon_writel(mac, cfg_off, cfg);
 
 	while (retry--) {
-		if (xpon_readl(mac, G_GEM_PORT_STS) & G_GEM_STS_CMD_DONE)
+		if (xpon_readl(mac, sts_off) & G_GEM_STS_CMD_DONE)
 			return 0;
 		udelay(1);
 	}
@@ -278,7 +298,9 @@ int gpon_gem_port_write(u16 gem_port, bool valid, bool encrypt)
 
 int gpon_gem_port_read(u16 gem_port, bool *valid, bool *encrypt)
 {
-	void __iomem *mac = gpon_mac();
+	void __iomem *mac = xpon_gem_base();
+	u32 cfg_off = xpon_gem_is_xgs() ? XGS_GEM_PORT_CFG : G_GEM_PORT_CFG;
+	u32 sts_off = xpon_gem_is_xgs() ? XGS_GEM_PORT_STS : G_GEM_PORT_STS;
 	int retry = GPON_CMD_RETRY;
 	u32 sts;
 
@@ -287,11 +309,11 @@ int gpon_gem_port_read(u16 gem_port, bool *valid, bool *encrypt)
 	if (gem_port >= GPON_MAX_GEM_ID)
 		return -EINVAL;
 
-	xpon_writel(mac, G_GEM_PORT_CFG,
+	xpon_writel(mac, cfg_off,
 		    XP_SET(0, G_GEM_CFG_ID_LO, G_GEM_CFG_ID_W, gem_port));
 
 	while (retry--) {
-		sts = xpon_readl(mac, G_GEM_PORT_STS);
+		sts = xpon_readl(mac, sts_off);
 		if (sts & G_GEM_STS_CMD_DONE) {
 			if (valid)
 				*valid = !!(sts & G_GEM_STS_VLD);
@@ -309,7 +331,8 @@ int gpon_gem_port_read(u16 gem_port, bool *valid, bool *encrypt)
  * Configure_Port-ID PLOAM message. */
 int gpon_set_omcc_port(u16 gem_port, bool valid)
 {
-	void __iomem *mac = gpon_mac();
+	void __iomem *mac = xpon_gem_base();
+	u32 omci_off = xpon_gem_is_xgs() ? XGS_OMCI_ID : G_OMCI_ID;
 	u32 v;
 
 	if (!mac)
@@ -320,7 +343,7 @@ int gpon_set_omcc_port(u16 gem_port, bool valid)
 	v = XP_SET(0, G_OMCI_GPID_LO, G_OMCI_GPID_W, valid ? gem_port : 0);
 	if (valid)
 		v |= G_OMCI_VLD;
-	xpon_writel(mac, G_OMCI_ID, v);
+	xpon_writel(mac, omci_off, v);
 
 	/* The OMCC port must also exist in the GEM table to be received. */
 	if (valid)

@@ -35,11 +35,14 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 	if (!xp)
 		return -ENODEV;
 
-	/* Only GPON and EPON are supported by the EN7581 PON serdes/PCS today.
-	 * The vendor airoha_eth_set_xpon_mode() likewise rejects anything other
-	 * than GPON/EPON, and the XG(S)-PON MAC engine is not yet ported (report
-	 * §2/§11). 10G-EPON additionally needs different BOSA optics, so it is out
-	 * of scope for this hardware. */
+	/* The EN7581 PON serdes/PCS (phy-airoha-xpon, derived from EN7523/EN7571)
+	 * only accepts GPON/EPON submodes, so the generic PHY is driven for those
+	 * two and left alone for XGS-PON (its 10G line rate is configured by the
+	 * stock firmware's own serdes path). XGS-PON itself IS supported: the
+	 * XGS-PON MAC engine at mac+0x5000 is a parallel of the GPON engine and its
+	 * GEM/OMCI register block is now ported (see the XPON_MODE_XGPON case and
+	 * xpon.h XGS_GEM_*). 10G-EPON additionally needs different BOSA optics, so
+	 * it remains out of scope. */
 	switch (mode) {
 	case XPON_MODE_GPON:
 		submode = XPON_PHY_SUBMODE_GPON;
@@ -53,20 +56,31 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 		/* XGS-PON (10G symmetric) IS supported by the hardware and the stock
 		 * firmware: the XGS-PON MAC engine lives at base+0x5000 (xgspon_reg,
 		 * XGSPON_REG_OFFSET in airoha_xpon.c) and the stock xpon.ko programmes
-		 * it at runtime. Caveats implemented here:
+		 * it at runtime. The GEM/OMCI register block there is a *parallel* of
+		 * the GPON engine (vendor airoha_xpon.c: GPON@0x4000 / XGS@0x5000 /
+		 * EPON@0x6000 sibling sub-blocks, identical relative offsets), so the
+		 * GEM port table, OMCI channel and idle-GEM threshold are now ported
+		 * and the gpon_gem_* / gpon_set_omcc_port helpers switch to xgspon_reg
+		 * automatically while mode == XGS-PON.
+		 *   - Caveat: the relative offsets are taken from the GPON register
+		 *     map and assumed to mirror in the XGS block; verify on hardware.
 		 *   - The EN7581 serdes PHY driver (phy-airoha-xpon, derived from
 		 *     EN7523/EN7571) only accepts GPON/EPON submodes; the 10G line
 		 *     rate for XGS-PON is configured by the stock firmware own serdes
-		 *     path, so we deliberately do NOT call the generic PHY.
+		 *     path, so we deliberately do NOT call the generic PHY here.
 		 *   - The SCU WAN_CONF field (EN7523 layout) defines only GPON/EPON;
 		 *     the stock firmware selects XGS-PON WAN via a different (econet)
-		 *     SCU path, so we leave SCU untouched.
-		 *   - The GEM sniffer / OMCI extraction registers for the XGS-PON block
-		 *     (0x5000) are NOT yet extracted from the firmware regmap
-		 *     (bitfields.json covers only the GPON window), so GEM bridging
-		 *     will not work until those are ported. Tracked as a follow-up. */
+		 *     SCU path, so SCU is left untouched. */
 		xp->mode = mode;
-		dev_info(xp->dev, "XGS-PON mode selected (MAC engine at 0x5000); serdes via stock firmware path, GEM/OMCI porting TBD\n");
+
+		if (xp->xgspon_reg) {
+			gpon_gem_table_init();
+			xpon_writel(xp->xgspon_reg, XGS_IDLE_GEM_THLD,
+				    GPON_IDLE_GEM_THLD_DEF);
+			dev_info(xp->dev, "XGS-PON mode selected; GEM/OMCI engine at 0x1fb69000 initialised\n");
+		} else {
+			dev_warn(xp->dev, "XGS-PON mode selected but xgspon_reg unmapped; GEM/OMCI TBD\n");
+		}
 		return 0;
 	}
 

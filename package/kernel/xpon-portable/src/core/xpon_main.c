@@ -380,9 +380,17 @@ static int xpon_probe(struct platform_device *pdev)
 	/* map the three XPON MAC register regions */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	xp->mac = devm_ioremap_resource(&pdev->dev, res);
-	xp->xgspon_reg = xp->mac + XPON_XGSPON_REG_OFFSET;
 	if (IS_ERR(xp->mac))
 		return PTR_ERR(xp->mac);
+
+	/* XGS-PON MAC engine sub-block (mac + 0x5000 = 0x1fb69000). It is NOT in
+	 * the DTS reg[] list (only the GPON sub-block is), so map it directly.
+	 * Deriving it as mac + 0x5000 would point outside the 0x3e8 GPON ioremap
+	 * window and fault on access. */
+	xp->xgspon_reg = devm_ioremap(&pdev->dev, XPON_XGS_BLOCK_BASE,
+				      XPON_XGS_BLOCK_SIZE);
+	if (IS_ERR(xp->xgspon_reg))
+		return PTR_ERR(xp->xgspon_reg);
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	xp->mac2 = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(xp->mac2))
