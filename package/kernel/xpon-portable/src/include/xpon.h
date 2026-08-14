@@ -89,6 +89,10 @@
 /* Global handle, defined in xpon_main.c, referenced by sub-modules. */
 extern struct xpon_dev *g_xp;
 
+/* Module-parameter MAC override for the EPON LLID source address (AA:BB:CC:DD:EE:FF).
+ * When set it takes precedence over the device-tree / factory value. */
+extern char *epon_onu_mac_override;
+
 struct gpon_priv;
 
 struct xpon_dev {
@@ -152,7 +156,7 @@ struct xpon_dev {
 	/* 10G-EPON (XEPON) MPCP registration FSM state (xpon_phy.c) */
 	u8			epon_llid_state[EPON_MAX_LLID];
 	u8			epon_llid_id[EPON_MAX_LLID];
-	u8			epon_onu_mac[ETH_ALEN];	/* our MAC for LLID MAC addr; TBD source */
+	u8			epon_onu_mac[ETH_ALEN];	/* our MAC for LLID MAC addr */
 	spinlock_t		epon_fsm_lock;
 };
 
@@ -561,6 +565,12 @@ enum xpon_epon_llid_state {
 irqreturn_t xpon_epon_isr(struct xpon_dev *xp);
 void xpon_epon_start_registration(struct xpon_dev *xp);
 void xpon_epon_stop_registration(struct xpon_dev *xp);
+
+/* Resolve the ONU MAC used as the EPON LLID source address, in precedence
+ * order: module param > device-tree (local-mac-address / mac-address, which may
+ * itself come from a factory-partition nvmem cell) > leave zero + warn. Call once
+ * at probe, before xpon_epon_init() starts the MPCP FSM. */
+int xpon_epon_resolve_onu_mac(struct xpon_dev *xp);
 
 /* Static-bring-up default values (open-source airoha_xpon.c). These are the
  * values the stock 1G EPON path writes; the 10G-XEPON block reuses them. */

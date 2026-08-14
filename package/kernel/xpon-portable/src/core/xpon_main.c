@@ -23,6 +23,8 @@
 #include <linux/atomic.h>
 #include <linux/delay.h>
 #include <linux/reset.h>
+#include <linux/of_net.h>		/* of_get_mac_address() */
+#include <linux/etherdevice.h>	/* mac_pton / is_valid_ether_addr */
 
 #include "xpon.h"
 
@@ -41,6 +43,13 @@
 static int pon_mode = XPON_MODE_GPON;
 module_param(pon_mode, int, 0444);
 MODULE_PARM_DESC(pon_mode, "PON protocol mode: 0=GPON, 1=EPON, 2=XGS-PON, 3=10G-EPON(XEPON)");
+
+/* ONU MAC advertised as the EPON LLID source address. Highest precedence over
+ * the DTS / factory value. Format: AA:BB:CC:DD:EE:FF (for lab / fixed-MAC use).
+ * Non-static on purpose: xpon_phy.c references it via the extern in xpon.h. */
+char *epon_onu_mac_override;
+module_param(epon_onu_mac_override, charp, 0444);
+MODULE_PARM_DESC(epon_onu_mac_override, "Override ONU MAC for EPON LLID (AA:BB:CC:DD:EE:FF)");
 
 struct xpon_dev *g_xp;
 
@@ -358,12 +367,38 @@ static ssize_t gpon_counters_show(struct device *dev, struct device_attribute *a
 }
 static DEVICE_ATTR_RO(gpon_counters);
 
+/* EPON LLID source MAC (runtime-overridable before OLT registration). */
+static ssize_t epon_onu_mac_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	struct xpon_dev *xp = platform_get_drvdata(to_platform_device(dev));
+	(void)attr;
+	return snprintf(buf, PAGE_SIZE, "%pM\n", xp->epon_onu_mac);
+}
+static ssize_t epon_onu_mac_store(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct xpon_dev *xp = platform_get_drvdata(to_platform_device(dev));
+	u8 mac[ETH_ALEN];
+	(void)attr;
+	if (!mac_pton(buf, mac) || !is_valid_ether_addr(mac))
+		return -EINVAL;
+	spin_lock(&xp->epon_fsm_lock);
+	ether_addr_copy(xp->epon_onu_mac, mac);
+	spin_unlock(&xp->epon_fsm_lock);
+	dev_info(dev, "XEPON: ONU MAC set to %pM via sysfs\n", mac);
+	return count;
+}
+static DEVICE_ATTR_RW(epon_onu_mac);
+
 static struct attribute *xpon_attrs[] = {
 	&dev_attr_sn.attr,
 	&dev_attr_password.attr,
 	&dev_attr_tcont_stats.attr,
 	&dev_attr_onu_state.attr,
 	&dev_attr_gpon_counters.attr,
+	&dev_attr_epon_onu_mac.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(xpon);
@@ -403,6 +438,12 @@ static int xpon_probe(struct platform_device *pdev)
 	if (IS_ERR(xp->mac3))
 		return PTR_ERR(xp->mac3);
 	xp->xgspon_reg = xp->mac3;	/* XGS-PON sub-block @ 0x1fb65000 */
+
+	/* Resolve the ONU MAC used as the EPON LLID source address (module param >
+	 * DTS local-mac-address / factory nvmem cell). Done before xpon_hw_init()
+	 * because XPON_PHY_SET_MODE -> xpon_epon_init() starts the MPCP FSM, which
+	 * needs a valid MAC ready at REGISTER time. */
+	xpon_epon_resolve_onu_mac(xp);
 
 	/* PON PHY region(s) via phandle "econet,ecnt-pon_phy" */
 	xp->pon_phy = devm_ioremap(&pdev->dev, PON_PHY_BASE, PON_PHY_SIZE);

@@ -24,6 +24,8 @@
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/io.h>
+#include <linux/of_net.h>		/* of_get_mac_address() */
+#include <linux/etherdevice.h>	/* mac_pton / is_valid_ether_addr */
 #include "xpon.h"
 
 /* 10G-EPON (XEPON) MAC bring-up.
@@ -159,6 +161,54 @@ static int xpon_epon_init(struct xpon_dev *xp)
 	return 0;
 }
 
+/* --- XEPON ONU MAC source resolution ---------------------------------------
+ *
+ * The MAC we advertise as the source of an EPON LLID's upstream frames is a
+ * board/factory property, NOT a register we invent. Resolve it once at probe:
+ *   1. module parameter epon_onu_mac_override  (highest precedence, for lab use)
+ *   2. device tree `local-mac-address` / `mac-address`
+ *        - on production units this is typically an nvmem cell pointing at the
+ *          factory partition (e.g. nvmem-cells = <&macaddr_factory_0>;), which
+ *          of_get_mac_address() resolves transparently.
+ *   3. otherwise leave zero and warn (registration still runs, but with a
+ *      zero source MAC until the user supplies one via sysfs). */
+int xpon_epon_resolve_onu_mac(struct xpon_dev *xp)
+{
+	struct device_node *np = xp->dev ? xp->dev->of_node : NULL;
+	const char *src = NULL;
+
+	/* 1. module parameter override (AA:BB:CC:DD:EE:FF) */
+	if (epon_onu_mac_override &&
+	    mac_pton(epon_onu_mac_override, xp->epon_onu_mac) &&
+	    is_valid_ether_addr(xp->epon_onu_mac))
+		src = "module-param";
+	/* 2. device tree (covers local-mac-address / mac-address / nvmem factory) */
+	else if (np) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 7, 0)
+		if (of_get_mac_address(np, xp->epon_onu_mac) == 0 &&
+		    is_valid_ether_addr(xp->epon_onu_mac))
+			src = "device-tree";
+#else
+		const u8 *m = of_get_mac_address(np);
+		if (!IS_ERR_OR_NULL(m) && is_valid_ether_addr(m)) {
+			ether_addr_copy(xp->epon_onu_mac, m);
+			src = "device-tree";
+		}
+#endif
+	}
+
+	if (src) {
+		dev_info(xp->dev, "XEPON: ONU MAC = %pM (source: %s)\n",
+			 xp->epon_onu_mac, src);
+		return 0;
+	}
+
+	dev_warn(xp->dev,
+		 "XEPON: no ONU MAC sourced (module param epon_onu_mac or DTS local-mac-address); "
+		 "EPON LLID will register with a zero source MAC until set via sysfs\n");
+	return -ENOENT;
+}
+
 /* --- XEPON (10G-EPON) MPCP registration FSM -------------------------------- */
 
 /* Ask the HW to emit a REGISTER_REQUEST on the next discovery opportunity. The
@@ -206,8 +256,9 @@ static void xpon_epon_handle_register(struct xpon_dev *xp, unsigned int n)
 	xp->epon_llid_id[n] = onu_id;
 
 	/* Program our ONU MAC as the source MAC for this LLID's upstream frames
-	 * (EPON_LLID_MAC_ADDR_0/1 == window 0x6104/0x6108). TODO: source this from
-	 * the factory MAC / DTS; for now it is xp->epon_onu_mac (default zero). */
+	 * (EPON_LLID_MAC_ADDR_0/1 == window 0x6104/0x6108). Sourced at probe via
+	 * xpon_epon_resolve_onu_mac() (module param > DTS local-mac-address /
+	 * factory nvmem cell > sysfs override). */
 	xpon_writel(ep, EPON_LLID_MAC_ADDR_0,
 		    ((u32)xp->epon_onu_mac[0] << 24) | ((u32)xp->epon_onu_mac[1] << 16) |
 		    ((u32)xp->epon_onu_mac[2] <<  8) |  (u32)xp->epon_onu_mac[3]);
