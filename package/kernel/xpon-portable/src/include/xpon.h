@@ -338,14 +338,35 @@ struct xpon_dev {
  * 0x048/0x04c/0x20c); they are spelled out explicitly so the XGS path is
  * self-documenting and each can be corrected independently on hardware.
  *
- *   >>> MIRRORED FROM THE GPON BLOCK -- VERIFY ON XGS-PON HARDWARE <<<
- * Bit-field meanings are identical to the G_GEM_* / G_OMCI_* definitions
- * above, so the GPON bit-field macros are reused on the XGS base. */
-#define XGS_GEM_PORT_CFG	0x040	/* == G_GEM_PORT_CFG relative offset */
-#define XGS_GEM_PORT_STS	0x044
-#define XGS_OMCI_ID		0x048
-#define XGS_GEM_TBL_INIT	0x04c
-#define XGS_IDLE_GEM_THLD	0x20c	/* == DBG_IDLE_GEM_THLD relative offset */
+ * XGS-PON (10G) MAC registers, all RELATIVE TO xgspon_reg (0x1fb65000, the XGS
+ * sub-block). They are NOT a mirror of the GPON block. The offsets below were
+ * extracted by disassembling the stock xpon_10g.ko (10GxPONMAC V1.0.0.0): its
+ * gponDev* helpers address registers as g_xgpon_mac_reg_BASE + 0x5xxx, where
+ * g_xgpon_mac_reg_BASE is the PON-MAC window base (0x1fb60000); the XGS
+ * sub-block starts at +0x5000, so the driver-side offset is (0x5xxx - 0x5000).
+ * Bit-field positions are reconstructed from the disassembly (gponDevSetGemInfoNoCheck
+ * etc.) and MUST be confirmed on hardware. */
+#define XGS_GEM_PORT_CFG	0x274	/* +0x5274: indirect GEM port write */
+#define  XGS_GEM_CFG_CMD	XP_BIT(31)	/* triggers the indirect write */
+#define  XGS_GEM_CFG_VLD	XP_BIT(18)	/* entry valid */
+/* XGS bit17 is set when the encrypt argument is 0 (fw: cset ne on encrypt) --
+ * exact field semantic TBD on hardware; kept to match stock firmware */
+#define  XGS_GEM_CFG_ENCRYPT_N	XP_BIT(17)
+#define  XGS_GEM_CFG_PORT_LO	0
+#define  XGS_GEM_CFG_PORT_W	16
+#define XGS_GEM_PORT_STS	0x278	/* +0x5278: read-back / cmd-done */
+#define  XGS_GEM_STS_CMD_DONE	XP_BIT(31)
+#define  XGS_GEM_STS_VLD	XP_BIT(18)
+#define  XGS_GEM_STS_ENCRYPT	XP_BIT(17)
+#define XGS_GEM_TBL_INIT	0x260	/* +0x5260: bit0=start, bit8=done */
+#define XGS_GEM_MIB_IDX_TBL_SIZE	0x504	/* +0x5504: written 0xb by stock fw */
+#define XGS_GEM_IDLE_THLD	0x280	/* +0x5280: idle GEM threshold */
+#define XGS_OMCI_MIC_CTRL	0x800	/* +0x5800: OMCI MIC enable */
+#define  XGS_OMCI_MIC_DS_EN	XP_BIT(4)	/* gponDevSetDownstreamOmciMicCtrl */
+#define  XGS_OMCI_MIC_US_EN	XP_BIT(3)	/* gponDevSetUpstreamOmciMicCtrl */
+#define XGS_OMCI_IK0(n)		(0x380 + (n) * 4)	/* +0x5380..0x538c */
+#define XGS_OMCI_IK1(n)		(0x390 + (n) * 4)	/* +0x5390..0x539c */
+#define XGS_OMCI_IK_IDX		0x3e8	/* +0x53e8 */
 
 /* Upstream physical-layer overhead (programmed from Upstream_Overhead PLOAM) */
 #define G_PLOu_OVERHEAD		GPON_REG(0x4090)	/* plou_overhead[7:0] */

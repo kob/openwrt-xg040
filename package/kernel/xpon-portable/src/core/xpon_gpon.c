@@ -75,12 +75,10 @@ void gpon_field(u32 off, u32 lo, u32 w, u32 val)
 }
 
 /* GEM/OMCI register window for the *active* PON mode. The XGS-PON MAC engine
- * (xgspon_reg = 0x1fb65000, DTS reg[2] = GPON sub-block 0x1fb64000 + 0x1000)
- * mirrors the GPON engine's GEM/OMCI layout, so in XGS-PON mode the GEM port
- * table / OMCI channel must be programmed into the XGS sub-block. The relative
- * offsets are identical (XGS_GEM_PORT_CFG etc.), only the base differs.
- * NOTE: internal register offsets are a MIRROR of GPON -- unverified from the
- * stock xpon.ko (which has no XGS code); confirm on hardware. */
+ * (xgspon_reg = 0x1fb65000, DTS reg[2] = PON window 0x1fb60000 + 0x5000)
+ * The XGS-PON MAC has its OWN register layout (extracted from stock
+ * xpon_10g.ko), not a mirror of the GPON block. gpon_gem_base() selects the XGS
+ * base and the helpers below use the XGS_* register/bit-field constants. */
 static inline bool xpon_gem_is_xgs(void)
 {
 	return g_xp && g_xp->mode == XPON_MODE_XGPON && g_xp->xgspon_reg;
@@ -255,6 +253,15 @@ int gpon_gem_table_init(void)
 	int ret;
 	u32 off = xpon_gem_is_xgs() ? XGS_GEM_TBL_INIT : G_GEM_TBL_INIT;
 
+	if (xpon_gem_is_xgs()) {
+		void __iomem *mac = xpon_gem_base();
+
+		/* stock fw writes 0xb (10 entries + enable) to the MIB index table
+		 * size register before kicking off the GEM table initialiser */
+		if (mac)
+			xpon_writel(mac, XGS_GEM_MIB_IDX_TBL_SIZE, 0xb);
+	}
+
 	ret = gpon_table_init_one(off, "GEM port");
 	if (ret == -ETIMEDOUT)
 		ret = gpon_gem_table_clear_slow();
@@ -263,9 +270,14 @@ int gpon_gem_table_init(void)
 }
 
 /* ---------------- GEM port table (indirect) ----------------
- * Write:  G_GEM_PORT_CFG = cmd(1) | vld | encrypt | port_id, poll STS.cmd_done.
- * Read:   G_GEM_PORT_CFG = cmd(0) | port_id,        poll STS.cmd_done, then
+ * GPON (econet-xpon gponDevSetGemInfo):
+ *   Write: G_GEM_PORT_CFG = cmd(1) | vld | encrypt | port_id, poll STS.cmd_done.
+ *   Read:  G_GEM_PORT_CFG = cmd(0) | port_id, poll STS.cmd_done, then
  *         STS.vld / STS.encrypt hold the answer.
+ * XGS (extracted from stock xpon_10g.ko gponDevSetGemInfoNoCheck):
+ *   Write: XGS_GEM_PORT_CFG = cmd(bit31) | vld(bit18) | (encrypt==0? bit17) | port_id,
+ *         poll XGS_GEM_PORT_STS bit31. The OMCI MIC control register at
+ *         XGS_OMCI_MIC_CTRL (0x800) gates upstream/downstream MIC independently.
  */
 int gpon_gem_port_write(u16 gem_port, bool valid, bool encrypt)
 {
@@ -280,17 +292,29 @@ int gpon_gem_port_write(u16 gem_port, bool valid, bool encrypt)
 	if (gem_port >= GPON_MAX_GEM_ID)
 		return -EINVAL;
 
-	cfg = G_GEM_CFG_CMD |
-	      XP_SET(0, G_GEM_CFG_ID_LO, G_GEM_CFG_ID_W, gem_port);
-	if (valid)
-		cfg |= G_GEM_CFG_VLD;
-	if (encrypt)
-		cfg |= G_GEM_CFG_ENCRYPT;
+	if (xpon_gem_is_xgs()) {
+		cfg = XGS_GEM_CFG_CMD |
+		      XP_SET(0, XGS_GEM_CFG_PORT_LO, XGS_GEM_CFG_PORT_W, gem_port);
+		if (valid)
+			cfg |= XGS_GEM_CFG_VLD;
+		/* stock fw sets bit17 when the encrypt arg is 0 (cset ne); the exact
+		 * field semantic is TBD, kept to match the firmware behaviour */
+		if (!encrypt)
+			cfg |= XGS_GEM_CFG_ENCRYPT_N;
+	} else {
+		cfg = G_GEM_CFG_CMD |
+		      XP_SET(0, G_GEM_CFG_ID_LO, G_GEM_CFG_ID_W, gem_port);
+		if (valid)
+			cfg |= G_GEM_CFG_VLD;
+		if (encrypt)
+			cfg |= G_GEM_CFG_ENCRYPT;
+	}
 
 	xpon_writel(mac, cfg_off, cfg);
 
 	while (retry--) {
-		if (xpon_readl(mac, sts_off) & G_GEM_STS_CMD_DONE)
+		if (xpon_readl(mac, sts_off) &
+		    (xpon_gem_is_xgs() ? XGS_GEM_STS_CMD_DONE : G_GEM_STS_CMD_DONE))
 			return 0;
 		udelay(1);
 	}
@@ -311,16 +335,22 @@ int gpon_gem_port_read(u16 gem_port, bool *valid, bool *encrypt)
 	if (gem_port >= GPON_MAX_GEM_ID)
 		return -EINVAL;
 
-	xpon_writel(mac, cfg_off,
-		    XP_SET(0, G_GEM_CFG_ID_LO, G_GEM_CFG_ID_W, gem_port));
+	if (xpon_gem_is_xgs())
+		xpon_writel(mac, cfg_off,
+			    XP_SET(0, XGS_GEM_CFG_PORT_LO, XGS_GEM_CFG_PORT_W, gem_port));
+	else
+		xpon_writel(mac, cfg_off,
+			    XP_SET(0, G_GEM_CFG_ID_LO, G_GEM_CFG_ID_W, gem_port));
 
 	while (retry--) {
 		sts = xpon_readl(mac, sts_off);
-		if (sts & G_GEM_STS_CMD_DONE) {
+		if (sts & (xpon_gem_is_xgs() ? XGS_GEM_STS_CMD_DONE : G_GEM_STS_CMD_DONE)) {
 			if (valid)
-				*valid = !!(sts & G_GEM_STS_VLD);
+				*valid = !!(sts & (xpon_gem_is_xgs() ?
+						   XGS_GEM_STS_VLD : G_GEM_STS_VLD));
 			if (encrypt)
-				*encrypt = !!(sts & G_GEM_STS_ENCRYPT);
+				*encrypt = !!(sts & (xpon_gem_is_xgs() ?
+						     XGS_GEM_STS_ENCRYPT : G_GEM_STS_ENCRYPT));
 			return 0;
 		}
 		udelay(1);
@@ -330,28 +360,40 @@ int gpon_gem_port_read(u16 gem_port, bool *valid, bool *encrypt)
 }
 
 /* OMCC: the GEM port that carries OMCI. Programmed from the downstream
- * Configure_Port-ID PLOAM message. */
+ * Configure_Port-ID PLOAM message.
+ * On XGS-PON there is no dedicated OMCI-ID register (unlike GPON's G_OMCI_ID);
+ * the OMCI channel is just a normal GEM port programmed via XGS_GEM_PORT_CFG,
+ * so the XGS branch reuses gpon_gem_port_write(). */
 int gpon_set_omcc_port(u16 gem_port, bool valid)
 {
-	void __iomem *mac = xpon_gem_base();
-	u32 omci_off = xpon_gem_is_xgs() ? XGS_OMCI_ID : G_OMCI_ID;
-	u32 v;
+	if (xpon_gem_is_xgs()) {
+		if (valid && gem_port >= GPON_MAX_GEM_ID)
+			return -EINVAL;
+		if (valid)
+			return gpon_gem_port_write(gem_port, true, false);
+		return 0;
+	}
 
-	if (!mac)
-		return -ENODEV;
-	if (valid && gem_port >= GPON_MAX_GEM_ID)
-		return -EINVAL;
+	{
+		void __iomem *mac = xpon_gem_base();
+		u32 v;
 
-	v = XP_SET(0, G_OMCI_GPID_LO, G_OMCI_GPID_W, valid ? gem_port : 0);
-	if (valid)
-		v |= G_OMCI_VLD;
-	xpon_writel(mac, omci_off, v);
+		if (!mac)
+			return -ENODEV;
+		if (valid && gem_port >= GPON_MAX_GEM_ID)
+			return -EINVAL;
 
-	/* The OMCC port must also exist in the GEM table to be received. */
-	if (valid)
-		return gpon_gem_port_write(gem_port, true, false);
+		v = XP_SET(0, G_OMCI_GPID_LO, G_OMCI_GPID_W, valid ? gem_port : 0);
+		if (valid)
+			v |= G_OMCI_VLD;
+		xpon_writel(mac, G_OMCI_ID, v);
 
-	return 0;
+		/* The OMCC port must also exist in the GEM table to be received. */
+		if (valid)
+			return gpon_gem_port_write(gem_port, true, false);
+
+		return 0;
+	}
 }
 
 /* ---------------- T-CONT / Alloc-ID ----------------
