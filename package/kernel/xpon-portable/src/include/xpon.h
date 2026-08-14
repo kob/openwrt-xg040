@@ -34,15 +34,18 @@
 /* ----------------------- Register bases (from DTS) ----------------------- */
 #define XPON_MAC_BASE		0x1fb64000	/* reg[0] = GPON sub-block (GPON_REG_OFFSET 0x4000) */
 #define XPON_MAC_SIZE		0x3e8
-#define XPON_XGSPON_REG_OFFSET	0x5000	/* XGS-PON MAC engine block within PON MAC window (XGSPON_REG_OFFSET in airoha_xpon.c) */
-/* The PON MAC window is shared by three sibling sub-blocks (vendor
- * airoha_xpon.c: GPON_REG_OFFSET 0x4000 / XGSPON_REG_OFFSET 0x5000 /
- * EPON_REG_OFFSET 0x6000). DTS reg[0] only exposes the GPON sub-block
- * (0x1fb64000, size 0x3e8), so the XGS-PON sub-block is mapped directly by
- * the driver at its fixed physical address below -- mac + 0x5000 would land
- * OUTSIDE the GPON ioremap window and fault. */
-#define XPON_XGS_BLOCK_BASE	(XPON_MAC_BASE + XPON_XGSPON_REG_OFFSET) /* 0x1fb69000 */
-#define XPON_XGS_BLOCK_SIZE	0x2000
+#define XPON_XGSPON_REG_OFFSET	0x5000	/* window-relative offset of XGS-PON sub-block (XGSPON_REG_OFFSET in airoha_xpon.c) */
+/* The 64KB PON MAC window holds three sibling sub-blocks at fixed offsets
+ * (vendor airoha_xpon.c: GPON@0x4000 / XGS@0x5000 / EPON@0x6000). DTS reg[0]
+ * (=XPON_MAC_BASE=0x1fb64000) is the GPON sub-block, so the XGS sub-block is
+ * GPON_subblock + (0x5000-0x4000) = +0x1000 = 0x1fb65000. The DTS already
+ * exposes it as reg[2] (0x1fb65000), so the driver maps reg[2] (== xp->mac3)
+ * for xp->xgspon_reg.
+ * NOTE: xp->mac is the GPON sub-block; "mac + 0x5000" would wrongly address
+ * 0x1fb69000 (window+0x9000), NOT the XGS block. */
+#define XPON_XGS_SUBBLOCK_DELTA	0x1000	/* XGS_OFF(0x5000) - GPON_OFF(0x4000) */
+#define XPON_XGS_BLOCK_BASE	(XPON_MAC_BASE + XPON_XGS_SUBBLOCK_DELTA) /* 0x1fb65000 */
+#define XPON_XGS_BLOCK_SIZE	0x1000
 #define XPON_MAC2_BASE		0x1fb66000	/* reg[1] */
 #define XPON_MAC2_SIZE		0x23c
 #define XPON_MAC3_BASE		0x1fb65000	/* reg[2] */

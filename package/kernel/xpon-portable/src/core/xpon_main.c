@@ -383,14 +383,12 @@ static int xpon_probe(struct platform_device *pdev)
 	if (IS_ERR(xp->mac))
 		return PTR_ERR(xp->mac);
 
-	/* XGS-PON MAC engine sub-block (mac + 0x5000 = 0x1fb69000). It is NOT in
-	 * the DTS reg[] list (only the GPON sub-block is), so map it directly.
-	 * Deriving it as mac + 0x5000 would point outside the 0x3e8 GPON ioremap
-	 * window and fault on access. */
-	xp->xgspon_reg = devm_ioremap(&pdev->dev, XPON_XGS_BLOCK_BASE,
-				      XPON_XGS_BLOCK_SIZE);
-	if (IS_ERR(xp->xgspon_reg))
-		return PTR_ERR(xp->xgspon_reg);
+	/* The 64KB PON MAC window holds three sibling sub-blocks (vendor
+	 * airoha_xpon.c: GPON@0x4000 / XGS@0x5000 / EPON@0x6000). DTS reg[0]=0x1fb64000
+	 * is GPON, reg[1]=0x1fb66000 is EPON, reg[2]=0x1fb65000 is XGS-PON. So
+	 * xp->xgspon_reg maps to reg[2].
+	 * NOTE: xp->mac is the GPON sub-block, so "mac + 0x5000" would wrongly
+	 * address 0x1fb69000; the correct XGS base is 0x1fb65000 (mac + 0x1000). */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	xp->mac2 = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(xp->mac2))
@@ -399,6 +397,7 @@ static int xpon_probe(struct platform_device *pdev)
 	xp->mac3 = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(xp->mac3))
 		return PTR_ERR(xp->mac3);
+	xp->xgspon_reg = xp->mac3;	/* XGS-PON sub-block @ 0x1fb65000 */
 
 	/* PON PHY region(s) via phandle "econet,ecnt-pon_phy" */
 	xp->pon_phy = devm_ioremap(&pdev->dev, PON_PHY_BASE, PON_PHY_SIZE);

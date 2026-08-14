@@ -77,7 +77,7 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 			gpon_gem_table_init();
 			xpon_writel(xp->xgspon_reg, XGS_IDLE_GEM_THLD,
 				    GPON_IDLE_GEM_THLD_DEF);
-			dev_info(xp->dev, "XGS-PON mode selected; GEM/OMCI engine at 0x1fb69000 initialised\n");
+			dev_info(xp->dev, "XGS-PON mode selected; GEM/OMCI engine at 0x1fb65000 initialised\n");
 		} else {
 			dev_warn(xp->dev, "XGS-PON mode selected but xgspon_reg unmapped; GEM/OMCI TBD\n");
 		}

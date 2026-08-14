@@ -75,10 +75,12 @@ void gpon_field(u32 off, u32 lo, u32 w, u32 val)
 }
 
 /* GEM/OMCI register window for the *active* PON mode. The XGS-PON MAC engine
- * (xgspon_reg = mac + 0x5000) mirrors the GPON engine's GEM/OMCI layout, so in
- * XGS-PON mode the GEM port table / OMCI channel must be programmed into the
- * XGS sub-block. The relative offsets are identical (XGS_GEM_PORT_CFG etc.),
- * only the base differs. */
+ * (xgspon_reg = 0x1fb65000, DTS reg[2] = GPON sub-block 0x1fb64000 + 0x1000)
+ * mirrors the GPON engine's GEM/OMCI layout, so in XGS-PON mode the GEM port
+ * table / OMCI channel must be programmed into the XGS sub-block. The relative
+ * offsets are identical (XGS_GEM_PORT_CFG etc.), only the base differs.
+ * NOTE: internal register offsets are a MIRROR of GPON -- unverified from the
+ * stock xpon.ko (which has no XGS code); confirm on hardware. */
 static inline bool xpon_gem_is_xgs(void)
 {
 	return g_xp && g_xp->mode == XPON_MODE_XGPON && g_xp->xgspon_reg;
