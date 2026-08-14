@@ -79,6 +79,7 @@
 /* submodes for phy_set_mode_ext(phy, PHY_MODE_ETHERNET, submode) */
 #define XPON_PHY_SUBMODE_GPON\t0
 #define XPON_PHY_SUBMODE_EPON\t1
+#define XPON_PHY_SUBMODE_XEPON	3	/* 10G-EPON (XEPON); generic PHY does not accept it yet */
 
 /* Interrupt lines from DTS (GIC SPI numbers). */
 #define XPON_IRQ_0		42	/* 0x2a */

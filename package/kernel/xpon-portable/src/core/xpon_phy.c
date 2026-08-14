@@ -41,8 +41,12 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 	 * stock firmware's own serdes path). XGS-PON itself IS supported: the
 	 * XGS-PON MAC engine at mac+0x5000 is a parallel of the GPON engine and its
 	 * GEM/OMCI register block is now ported (see the XPON_MODE_XGPON case and
-	 * xpon.h XGS_GEM_*). 10G-EPON additionally needs different BOSA optics, so
-	 * it remains out of scope. */
+	 * xpon.h XGS_GEM_*). 10G modes (XGS-PON and 10G-EPON). The 10G MAC engine is the sibling block at
+	 * mac+0x5000 (xgspon_reg); its 10G line rate is configured by the stock firmware's
+	 * own serdes path, so the generic PHY is deliberately not driven and the SCU
+	 * WAN_CONF field (GPON/EPON only) is left untouched. 10G-EPON additionally
+	 * needs the 10G MAC switched to IEEE 802.3av framing (doEponSetMode in
+	 * xpon_10g.ko); that register map is still TBD. */
 	switch (mode) {
 	case XPON_MODE_GPON:
 		submode = XPON_PHY_SUBMODE_GPON;
@@ -82,6 +86,26 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 			dev_warn(xp->dev, "XGS-PON mode selected but xgspon_reg unmapped; GEM/OMCI TBD\n");
 		}
 		return 0;
+
+	case XPON_MODE_XEPON:
+		/* 10G-EPON (XEPON, IEEE 802.3av) reuses the SAME 10G PON MAC block
+		 * (xgspon_reg = mac + 0x5000 = 0x1fb65000) as XGS-PON. The two 10G modes
+		 * differ only in MAC framing: 10G-EPON uses MPCP discovery/registration
+		 * (LLID) + OAM + DBA report, whereas XGS-PON uses GEM/OMCI. The framing
+		 * is selected by the stock firmware's doEponSetMode() register writes
+		 * inside xpon_10g.ko. The XEPON register map (MPCP/LLID/OAM/DBA/encryption)
+		 * has NOT been extracted from xpon_10g.ko yet, so we only record the mode
+		 * and defer MAC programming. The generic serdes PHY does not accept a
+		 * 10G-EPON submode and the SCU WAN_CONF field encodes only GPON/EPON, so
+		 * both are left untouched (cf. XGS-PON). */
+		xp->mode = mode;
+		dev_info(xp->dev,
+			 "10G-EPON (XEPON) mode selected; 10G MAC block at 0x1fb65000 shared with XGS-PON. XEPON register map TBD (extract from xpon_10g.ko)\n");
+		return 0;
+
+	default:
+		dev_err(xp->dev, "xPON mode %d not supported\n", mode);
+		return -EOPNOTSUPP;
 	}
 
 	/* 1) Drive the PON serdes/PCS line rate + PCS mode. The generic PHY bound

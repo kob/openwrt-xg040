@@ -38,6 +38,10 @@
 #define DRV_NAME	"xpon"
 #define DRV_VERSION	"0.1-re"
 
+static int pon_mode = XPON_MODE_GPON;
+module_param(pon_mode, int, 0444);
+MODULE_PARM_DESC(pon_mode, "PON protocol mode: 0=GPON, 1=EPON, 2=XGS-PON, 3=10G-EPON(XEPON)");
+
 struct xpon_dev *g_xp;
 
 /* ---------------- interrupt handlers ---------------- */
@@ -436,10 +440,22 @@ static int xpon_probe(struct platform_device *pdev)
 	atomic_set(&xp->gpon->to1_expiry_cnt, GPON_TO1_RESET_CNT);
 	atomic_set(&xp->gpon->hw_reset_cnt, 0);
 
-	/* This driver currently implements the GPON data path (GEM sniffer + QDMA +
-	 * OMCC). Default the protocol mode to GPON; EPON can be selected at runtime
-	 * once its MAC engine is ported, XG(S)-PON / 10G-EPON are not supported. */
-	xp->mode = XPON_MODE_GPON;
+	/* This driver now accepts all four PON protocol modes at the MAC level:
+	 * GPON(0), EPON(1), XGS-PON(2, 10G GEM/OMCI, ported), 10G-EPON/XEPON(3,
+	 * register map TBD). Default to GPON unless overridden via the pon_mode
+	 * module parameter. */
+	switch (pon_mode) {
+	case XPON_MODE_GPON:
+	case XPON_MODE_EPON:
+	case XPON_MODE_XGPON:
+	case XPON_MODE_XEPON:
+		xp->mode = pon_mode;
+		break;
+	default:
+		dev_warn(&pdev->dev, "invalid pon_mode=%d, defaulting to GPON\n", pon_mode);
+		xp->mode = XPON_MODE_GPON;
+	}
+
 	ret = xpon_hw_init(xp);
 	if (ret)
 		return ret;
