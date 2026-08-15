@@ -114,9 +114,9 @@ MODULE_PARM_DESC(omcc_loopback,
 #define RD_BE32(p) (((u32)(p)[0] << 24) | ((u32)(p)[1] << 16) | \
 		    ((u32)(p)[2] << 8)  |  (u32)(p)[3])
 #define RD_BE16(p) (((u32)(p)[0] << 8)  |  (u32)(p)[1])
-#define WR_BE32(p, v) do { (p)[0] = (v) >> 24; (p)[1] = (v) >> 16; \
-			   (p)[2] = (v) >> 8;  (p)[3] = (v); } while (0)
-#define WR_BE16(p, v) do { (p)[0] = (v) >> 8; (p)[1] = (v); } while (0)
+#define WR_BE32(p, v) do { (p)[0] = (u8)((v) >> 24); (p)[1] = (u8)((v) >> 16); \
+			   (p)[2] = (u8)((v) >> 8);  (p)[3] = (u8)(v); } while (0)
+#define WR_BE16(p, v) do { (p)[0] = (u8)((v) >> 8); (p)[1] = (u8)(v); } while (0)
 
 /*
  * CRC-32/ITU-I.363.5 (non-reflected), the G.988 OMCI MIC.

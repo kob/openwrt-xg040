@@ -144,7 +144,7 @@ enum xpon_mode {
 	XPON_MODE_GPON = 0,
 	XPON_MODE_EPON = 1,
 	XPON_MODE_XGPON = 2,
-	XPON_MODE_XEPON = 3,	/* 10G-EPON (IEEE 802.3av), "XEPON" in stock fw */
+	XPON_MODE_XEPON = 3,
 	XPON_MODE_UNKNOWN = 0xff,
 };
 

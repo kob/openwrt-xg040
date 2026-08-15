@@ -84,7 +84,7 @@ static inline bool xpon_gem_is_xgs(void)
 	return g_xp && g_xp->mode == XPON_MODE_XGPON && g_xp->xgspon_reg;
 }
 
-void __iomem *xpon_gem_base(void)
+static void __iomem *xpon_gem_base(void)
 {
 	if (xpon_gem_is_xgs())
 		return g_xp->xgspon_reg;

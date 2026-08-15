@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_address.h>
 #include <linux/interrupt.h>
@@ -37,7 +38,6 @@
 #define xpon_class_create(name) class_create(name)
 #endif
 
-#define DRV_NAME	"xpon"
 #define DRV_VERSION	"0.1-re"
 
 static int pon_mode = XPON_MODE_GPON;
@@ -417,27 +417,25 @@ static int xpon_probe(struct platform_device *pdev)
 	mutex_init(&xp->lock);
 	spin_lock_init(&xp->epon_fsm_lock);
 
-	/* map the three XPON MAC register regions */
+	/* Map the three XPON MAC sub-block register windows. The stock an7581
+	 * (XG-040G-MD) DTS exposes them as three split cells:
+	 *   reg[0]=0x1fb64000 (GPON)  reg[1]=0x1fb66000 (EPON)  reg[2]=0x1fb65000 (XGS)
+	 * xp->xgspon_reg == reg[2] == the XGS-PON sub-block. */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	xp->mac = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(xp->mac))
 		return PTR_ERR(xp->mac);
 
-	/* The 64KB PON MAC window holds three sibling sub-blocks (vendor
-	 * airoha_xpon.c: GPON@0x4000 / XGS@0x5000 / EPON@0x6000). DTS reg[0]=0x1fb64000
-	 * is GPON, reg[1]=0x1fb66000 is EPON, reg[2]=0x1fb65000 is XGS-PON. So
-	 * xp->xgspon_reg maps to reg[2].
-	 * NOTE: xp->mac is the GPON sub-block, so "mac + 0x5000" would wrongly
-	 * address 0x1fb69000; the correct XGS base is 0x1fb65000 (mac + 0x1000). */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	xp->mac2 = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(xp->mac2))
 		return PTR_ERR(xp->mac2);
+
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
 	xp->mac3 = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(xp->mac3))
 		return PTR_ERR(xp->mac3);
-	xp->xgspon_reg = xp->mac3;	/* XGS-PON sub-block @ 0x1fb65000 */
+	xp->xgspon_reg = xp->mac3;	/* XGS-PON sub-block */
 
 	/* Resolve the ONU MAC used as the EPON LLID source address (module param >
 	 * DTS local-mac-address / factory nvmem cell). Done before xpon_hw_init()
@@ -451,6 +449,12 @@ static int xpon_probe(struct platform_device *pdev)
 	xp->pon_phy_aux1 = devm_ioremap(&pdev->dev, PON_PHY_AUX1_BASE, PON_PHY_AUX1_SIZE);
 	xp->serdes = devm_ioremap(&pdev->dev, SERDES_COMMON_BASE, SERDES_COMMON_SIZE);
 	xp->xpon_usxgmii = devm_ioremap(&pdev->dev, XPON_USXGMII_BASE, XPON_USXGMII_SIZE);
+
+	/* XPON SERDES / USXGMII PCS windows (serdes training sequences). */
+	xp->xpon_serdes = devm_ioremap(&pdev->dev, XPON_SERDES_BASE, XPON_SERDES_SIZE);
+	xp->xpon_serdes_aux = devm_ioremap(&pdev->dev, XPON_SERDES_AUX_BASE, XPON_SERDES_AUX_SIZE);
+	xp->xpon_serdes_r0 = devm_ioremap(&pdev->dev, XPON_SERDES_R0_BASE, XPON_SERDES_R0_SIZE);
+	xp->xpon_serdes_r1 = devm_ioremap(&pdev->dev, XPON_SERDES_R1_BASE, XPON_SERDES_R1_SIZE);
 
 	/* Optional xPON SERDES/PCS generic PHY used for protocol-mode switching.
 	 * If the kernel ships drivers/phy/airoha/phy-airoha-xpon.c, the PCS line
@@ -553,9 +557,9 @@ static int xpon_probe(struct platform_device *pdev)
 	g_xp = xp;
 	platform_set_drvdata(pdev, xp);
 
-	ret = devm_device_add_group(&pdev->dev, &xpon_group);
-	if (ret)
-		dev_warn(&pdev->dev, "sysfs group create failed: %d\n", ret);
+	/* The sysfs attribute group is registered by the driver core through
+	 * xpon_driver.driver.dev_groups; devm_device_add_group() is deprecated
+	 * and absent from recent kernels. */
 
 	dev_info(&pdev->dev, "EN7581 XPON driver probed (ver %s)\n", DRV_VERSION);
 	return 0;
@@ -565,7 +569,7 @@ err_hw:
 	return ret;
 }
 
-static int xpon_remove(struct platform_device *pdev)
+static void xpon_remove_common(struct platform_device *pdev)
 {
 	struct xpon_dev *xp = platform_get_drvdata(pdev);
 
@@ -579,10 +583,28 @@ static int xpon_remove(struct platform_device *pdev)
 	xpon_qdma_exit(xp);
 	xpon_teardown_chrdevs(xp);
 	xpon_hw_deinit(xp);
-	return 0;
 }
 
+/* platform_driver::remove lost its int return in Linux 6.11 (the .remove_new
+ * transition landed); keep both spellings buildable from one source. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+static int xpon_remove(struct platform_device *pdev)
+{
+	xpon_remove_common(pdev);
+	return 0;
+}
+#else
+static void xpon_remove(struct platform_device *pdev)
+{
+	xpon_remove_common(pdev);
+}
+#endif
+
 static const struct of_device_id xpon_of_match[] = {
+	/* Stock XG-040G-MD (an7581) firmware xpon.ko binding. This is the only
+	 * relevant compatible: the upstream net-airoha xpon driver covers the
+	 * en7523 / en7521 / en7526 / en751221 (arm/mips) SoC families, NOT the
+	 * an7581 (aarch64). */
 	{ .compatible = "econet,ecnt-xpon", },
 	{ .compatible = "airoha,en7581-xpon", },
 	{ /* sentinel */ }
@@ -595,6 +617,7 @@ static struct platform_driver xpon_driver = {
 	.driver = {
 		.name	= DRV_NAME,
 		.of_match_table = xpon_of_match,
+		.dev_groups = xpon_groups,	/* sn / password / onu_state / ... */
 	},
 };
 

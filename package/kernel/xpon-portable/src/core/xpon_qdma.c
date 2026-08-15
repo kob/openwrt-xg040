@@ -360,9 +360,9 @@ refill:
 	return processed;
 }
 
-static void xpon_qdma_rx_tasklet(unsigned long data)
+static void xpon_qdma_rx_tasklet(struct tasklet_struct *t)
 {
-	struct xpon_qdma *q = (struct xpon_qdma *)data;
+	struct xpon_qdma *q = from_tasklet(q, t, rx_tasklet);
 
 	xpon_qdma_rx_drain(q);
 }
@@ -493,7 +493,7 @@ int xpon_qdma_init(struct xpon_dev *xp)
 				 "xpon_qdma: FE iomap failed, OAM routing skipped\n");
 	}
 
-	tasklet_init(&q->rx_tasklet, xpon_qdma_rx_tasklet, (unsigned long)q);
+	tasklet_setup(&q->rx_tasklet, xpon_qdma_rx_tasklet);
 
 	ret = xpon_qdma_tx_ring_alloc(q);
 	if (ret)

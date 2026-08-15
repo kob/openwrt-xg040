@@ -13,6 +13,12 @@
 #ifndef _XPON_H
 #define _XPON_H
 
+#include <linux/version.h>	/* LINUX_VERSION_CODE / KERNEL_VERSION: used by the
+				 * cross-version compat #if in xpon_main.c,
+				 * xpon_phy.c, xpon_netdev.c and xpon_act.c.
+				 * Not implicitly pulled in by module.h, so an
+				 * omission silently flips those #if to the
+				 * legacy branch and breaks the build. */
 #include <linux/types.h>
 #include <linux/device.h>
 #include <linux/cdev.h>
@@ -28,8 +34,25 @@
 #include <linux/regmap.h>
 #include <linux/mfd/syscon.h>
 #include <linux/bits.h>
+#include <linux/if_ether.h>
 
 #include "xpon_ioctl.h"
+
+/* del_timer()/del_timer_sync() were renamed to timer_delete()/
+ * timer_delete_sync() in Linux 6.2 and removed outright in 6.15. Use the new
+ * names throughout and map them back on older kernels. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
+#define timer_delete(t)		del_timer(t)
+#define timer_delete_sync(t)	del_timer_sync(t)
+#endif
+
+/* Driver name, shared by every compilation unit (used in pr_* / class / IRQ). */
+#define DRV_NAME	"xpon"
+
+/* Number of LLIDs the EPON MAC supports. Defined up here (not in the EPON
+ * register block below) because struct xpon_dev uses it for its per-LLID
+ * state arrays. */
+#define EPON_MAX_LLID		8
 
 /* ----------------------- Register bases (from DTS) ----------------------- */
 #define XPON_MAC_BASE		0x1fb64000	/* reg[0] = GPON sub-block (GPON_REG_OFFSET 0x4000) */
@@ -43,6 +66,12 @@
  * for xp->xgspon_reg.
  * NOTE: xp->mac is the GPON sub-block; "mac + 0x5000" would wrongly address
  * 0x1fb69000 (window+0x9000), NOT the XGS block. */
+/* NOTE: the stock an7581 (XG-040G-MD) DTS exposes the three PON MAC
+ * sub-blocks as three split reg cells (0x1fb64000 / 0x1fb66000 / 0x1fb65000),
+ * mapped individually by xpon_main.c. No single-window layout is used on
+ * an7581 (the windowed layout seen in the upstream buildroot belongs to the
+ * en751221 mips family, which this driver does not target). */
+
 #define XPON_XGS_SUBBLOCK_DELTA	0x1000	/* XGS_OFF(0x5000) - GPON_OFF(0x4000) */
 #define XPON_XGS_BLOCK_BASE	(XPON_MAC_BASE + XPON_XGS_SUBBLOCK_DELTA) /* 0x1fb65000 */
 #define XPON_XGS_BLOCK_SIZE	0x1000
@@ -65,6 +94,24 @@
 #define XPON_USXGMII_BASE	0x1fa80000
 #define XPON_USXGMII_SIZE	0xff
 
+/* XPON SERDES / USXGMII PCS register windows (reverse-engineered from the
+ * stock kernel xsgmii_drv_probe() descriptor fill -- see work/serdes*.txt).
+ * The serdes training sequences issued via the vendor xSGMII API target
+ * these four windows, selected by the RG_W_PL "sel" base offset:
+ *   sel=0x0    -> XPON_SERDES_BASE    (analog front-end, Get_Base)
+ *   sel=0x900  -> XPON_SERDES_R0_BASE (DTS xpon_usxgmii reg[0])
+ *   sel=0xa00  -> XPON_SERDES_R1_BASE (DTS xpon_usxgmii reg[1])
+ *   sel=0xb000 -> XPON_SERDES_AUX_BASE (PLL block, Get_Base)
+ * Write address = base + (off - sel). */
+#define XPON_SERDES_BASE	0x1fa8a000
+#define XPON_SERDES_SIZE	0x1000
+#define XPON_SERDES_AUX_BASE	0x1fa8b000
+#define XPON_SERDES_AUX_SIZE	0x1000
+#define XPON_SERDES_R0_BASE	0x1fa85900
+#define XPON_SERDES_R0_SIZE	0x334
+#define XPON_SERDES_R1_BASE	0x1fa80a00
+#define XPON_SERDES_R1_SIZE	0x168
+
 /* PON protocol-mode switching (mirrors airoha_kernel airoha_xpon.c).
  * The actual line-rate / PCS reconfiguration is performed by the generic
  * SERDES PHY (drivers/phy/airoha/phy-airoha-xpon.c) via phy_set_mode_ext(),
@@ -72,13 +119,13 @@
  * supported; XG(S)-PON and 10G-EPON need a MAC engine + BOSA optics that are
  * not yet ported (see report §2/§11) -- vendor airoha_eth_set_xpon_mode() also
  * rejects anything other than GPON/EPON. */
-#define XPON_SCU_WAN_CONF\t\t0x070\t/* offset in airoha,en7581-scu syscon */
-#define XPON_SCU_WAN_MODE_MASK\tGENMASK(7, 0)
-#define XPON_SCU_WAN_MODE_GPON\t0x00
-#define XPON_SCU_WAN_MODE_EPON\t0x01
+#define XPON_SCU_WAN_CONF  0x070 /* offset in airoha,en7581-scu syscon */
+#define XPON_SCU_WAN_MODE_MASK GENMASK(7, 0)
+#define XPON_SCU_WAN_MODE_GPON 0x00
+#define XPON_SCU_WAN_MODE_EPON 0x01
 /* submodes for phy_set_mode_ext(phy, PHY_MODE_ETHERNET, submode) */
-#define XPON_PHY_SUBMODE_GPON\t0
-#define XPON_PHY_SUBMODE_EPON\t1
+#define XPON_PHY_SUBMODE_GPON 0
+#define XPON_PHY_SUBMODE_EPON 1
 #define XPON_PHY_SUBMODE_XEPON	3	/* 10G-EPON (XEPON); generic PHY does not accept it yet */
 
 /* Interrupt lines from DTS (GIC SPI numbers). */
@@ -107,6 +154,11 @@ struct xpon_dev {
 	void __iomem		*pon_phy_aux1;
 	void __iomem		*serdes;
 	void __iomem		*xpon_usxgmii;
+	/* XPON SERDES / USXGMII PCS windows (serdes training, pon_serdes_init) */
+	void __iomem		*xpon_serdes;		/* 0x1fa8a000, sel=0 */
+	void __iomem		*xpon_serdes_aux;	/* 0x1fa8b000, sel=0xb000 */
+	void __iomem		*xpon_serdes_r0;	/* 0x1fa85900, sel=0x900 */
+	void __iomem		*xpon_serdes_r1;	/* 0x1fa80a00, sel=0xa00 */
 
 	int			irq[2];
 
@@ -127,6 +179,7 @@ struct xpon_dev {
 	atomic_t		omcc_rx_enq;
 	atomic_t		omcc_rx_drop;
 	atomic_t		omcc_tx;
+	u16			omci_gem_port;	/* implicit ONU-ID OMCI GEM Port-Id */
 
 	/* PON netdevice (xpon_netdev_ops) */
 	struct net_device	*netdev;
@@ -317,6 +370,9 @@ struct xpon_dev {
 #define G_AES_CFG		GPON_REG(0x4060)
 #define G_AES_ACTIVE_KEY0	GPON_REG(0x4064)	/* .. KEY3 @ 0x4070 */
 #define G_AES_SHADOW_KEY0	GPON_REG(0x4074)	/* .. KEY3 @ 0x4080 */
+#define G_AES_SHADOW_KEY1	GPON_REG(0x4078)
+#define G_AES_SHADOW_KEY2	GPON_REG(0x407c)
+#define G_AES_SHADOW_KEY3	GPON_REG(0x4080)
 #define G_AES_KEY_SWITCH_BY_SW	GPON_REG(0x4084)
 
 /* OMCI channel (OMCC GEM port) */
@@ -479,6 +535,11 @@ struct xpon_dev {
 #define  EPON_GLB_MAC_SW_RST	XP_BIT(4)	/* EPON_GLB_CFG: MAC soft-reset */
 #define  EPON_GLB_TXMBI_STOP	XP_BIT(8)
 #define  EPON_GLB_RXMBI_STOP	XP_BIT(9)
+/* bits 12/13: recovered from xpon_10g.ko epon_dev_tx_rx_disable, which ORs
+ * 0x3300 into EPON_GLB_CFG to gate the EPON TX/RX path (0x0300 == TXMBI_STOP |
+ * RXMBI_STOP, 0x3000 == these two bits). Exact semantics TBD (likely the MPI
+ * bus stop / TX-RX gate of the same bring-up sequence as gponDevMpiStop). */
+#define  EPON_GLB_TXRX_GATE_TBD	(XP_BIT(12) | XP_BIT(13))
 #define  EPON_GLB_FCS_ERR_FWD	XP_BIT(17)
 #define  EPON_GLB_MPCP_FWD	XP_BIT(22)
 #define  EPON_GLB_DISCV_BURST_EN	XP_BIT(23)
@@ -514,9 +575,6 @@ struct xpon_dev {
 
 /* MPCP timeout 10G field (EPON_MPCP_TIMEOUT_10G) */
 #define  EPON_MPCP_TO_MASK	0x3ff
-
-/* Number of LLIDs the EPON MAC supports (open-source EPON_MAX_LLID) */
-#define EPON_MAX_LLID		8
 
 /* ---------------------------------------------------------------------------
  * XEPON / 10G-EPON MPCP registration FSM
@@ -556,7 +614,7 @@ enum xpon_epon_llid_state {
  *   [7:0]  LLID value (onu_id), written by HW on REGISTER
  *   [x]    LLID enable bit (TBD shift) */
 #define  EPON_LLID_CFG_LLID_MASK	0xff
-#define  EPON_LLID_CFG_EN		XP_BIT(8)	/* TBD shift, UNVERIFIED */
+#define  EPON_LLID_CFG_EN		XP_BIT(8)		/* per-slice enable bit, position TBD. NOT applied in xpon_epon_handle_register(): the 4x8-bit LLID fields fill the whole 32-bit reg, so this bit collides with a neighbour LLID value and, for slice 3, shifts out of range (UB). Real enable register/field TBD on HW. */
 #define  EPON_LLID_CFG_REG(n) \
 	(((n) < 4) ? EPON_LLID0_3_CFG : EPON_LLID4_7_CFG)
 #define  EPON_LLID_CFG_SHIFT(n)	(((n) & 3) * 8)
@@ -991,6 +1049,7 @@ const char *gpon_state_name(enum gpon_state st);
 int  XPON_PHY_SET_MODE(enum xpon_mode mode);
 void pon_phy_reset(void);
 void pon_phy_tx_enable(bool on);
+void epon_set_laser_time(u8 laser_on, u8 laser_off);
 void PhyTxLedConf(void);
 int  pon_serdes_init(void);
 
@@ -1002,7 +1061,12 @@ void gpon_field(u32 off, u32 lo, u32 w, u32 val);
 /* xpon_netdev.c - xpon_netdev_ops / ndo_do_ioctl */
 int  xpon_netdev_init(struct xpon_dev *xp);
 void xpon_netdev_free(struct xpon_dev *xp);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 int  xpon_ndo_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
+#else
+int  xpon_ndo_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
+			     void __user *data, int cmd);
+#endif
 
 /* xpon_omcc.c - secure OMCC character device (airoha-omci transport ABI) */
 int  xpon_omcc_setup(struct xpon_dev *xp);

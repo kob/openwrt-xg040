@@ -9,7 +9,7 @@
 #
 # --- OpenWrt build --------------------------------------------------
 #   This file is invoked by the package Makefile (KDIR = $(LINUX_DIR)).
-#   Just drop the whole package under package/kernel/kmod-xpon-src/.
+#   Lives at package/kernel/xpon-portable/src/Makefile in the feed.
 
 obj-m += xpon.o
 

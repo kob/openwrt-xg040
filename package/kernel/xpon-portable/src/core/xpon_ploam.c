@@ -604,13 +604,6 @@ irqreturn_t gpon_irq_handler(int irq, void *dev_id)
 	(void)irq;
 	if (!xp || !xp->mac)
 		return IRQ_NONE;
-
-	/* XEPON (10G-EPON) owns a different MAC window (xp->mac2) with its own
-	 * interrupt status; dispatch its MPCP registration FSM there instead of
-	 * the GPON path. */
-	if (xp->mode == XPON_MODE_XEPON)
-		return xpon_epon_isr(xp);
-
 	m = xp->mac;
 
 	status = xpon_readl(m, G_INT_STATUS);

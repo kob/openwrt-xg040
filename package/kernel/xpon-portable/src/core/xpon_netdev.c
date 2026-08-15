@@ -35,7 +35,12 @@ static netdev_tx_t xpon_ndo_start_xmit(struct sk_buff *skb, struct net_device *d
 	return NETDEV_TX_OK;
 }
 
-int xpon_ndo_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+/* Private-ioctl core. The dispatch hook changed in Linux 5.15: ndo_do_ioctl was
+ * removed from net_device_ops and SIOCDEVPRIVATE now arrives via
+ * ndo_siocdevprivate, which passes the userspace pointer separately instead of
+ * leaving it in ifr->ifr_data. Both wrappers below funnel into this. */
+static int xpon_priv_ioctl(struct net_device *dev, struct ifreq *ifr,
+			   void __user *data, int cmd)
 {
 	struct xpon_dev *xp = *(struct xpon_dev **)netdev_priv(dev);
 
@@ -53,14 +58,32 @@ int xpon_ndo_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	 * from xpon_netdev_ops.ndo_do_ioctl in a future RE step if needed. */
 	(void)xp;
 	(void)ifr;
+	(void)data;
 	return -EOPNOTSUPP;
 }
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
+int xpon_ndo_do_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+{
+	return xpon_priv_ioctl(dev, ifr, ifr ? ifr->ifr_data : NULL, cmd);
+}
+#else
+int xpon_ndo_siocdevprivate(struct net_device *dev, struct ifreq *ifr,
+			    void __user *data, int cmd)
+{
+	return xpon_priv_ioctl(dev, ifr, data, cmd);
+}
+#endif
 
 static const struct net_device_ops xpon_netdev_ops = {
 	.ndo_open		= xpon_ndo_open,
 	.ndo_stop		= xpon_ndo_stop,
 	.ndo_start_xmit		= xpon_ndo_start_xmit,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0)
 	.ndo_do_ioctl		= xpon_ndo_do_ioctl,
+#else
+	.ndo_siocdevprivate	= xpon_ndo_siocdevprivate,
+#endif
 };
 
 int xpon_netdev_init(struct xpon_dev *xp)

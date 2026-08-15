@@ -138,8 +138,14 @@ void gpon_act_change_state(enum gpon_state new_state)
 		/* Filter out the OLT's periodic overhead / ext-burst PLOAMs now that
 		 * we are ranged, so they don't keep re-shaping our upstream burst.
 		 * The PHY-side oper_ranged_st=0x3 is owned by mainline pon_pcs. */
-		xp_field(G_PLOAMD_FILTER_IN_O5, 0, 1, 0x1); /* us_overhead filter */
-		xp_field(G_PLOAMD_FILTER_IN_O5, 8, 1, 0x1); /* ext_bst_len filter */
+		xp_field(DBG_PLOAMD_FILTER_IN_O5, 0, 1, 0x1); /* us_overhead filter */
+		xp_field(DBG_PLOAMD_FILTER_IN_O5, 8, 1, 0x1); /* ext_bst_len filter */
+
+		/* O5 = operation. Enable the GEM sniffer so downstream OMCI on
+		 * GEM Port 0x0001 is extracted to the CPU (QDMA ring15 -> OMCC
+		 * char device). Until now the sniffer was programmed but disabled
+		 * (see xpon_gem_init), so the OMCI control plane stays dark. */
+		xpon_gem_sniffer_enable(true);
 	} else if (new_state == GPON_STATE_O3 || new_state == GPON_STATE_O4) {
 		/* Mirror the cached extended T3 preamble into the MAC so the
 		 * SN/ranging burst carries enough preamble to be received. */
@@ -158,6 +164,10 @@ void gpon_act_change_state(enum gpon_state new_state)
 			 GPON_DEFAULT_RSP_TIME);
 		xp_field(DBG_DLY, DBG_DLY_FINE_INT_LO, DBG_DLY_FINE_INT_W,
 			 GPON_INTERNAL_DLY_DEF);
+
+		/* Dropped back to ranging: OMCI is no longer usable, stop
+		 * extracting OMCI to the CPU. */
+		xpon_gem_sniffer_enable(false);
 	}
 
 	/* Write the activation state into the MAC. */
@@ -181,8 +191,8 @@ void gpon_act_change_state(enum gpon_state new_state)
 		mod_timer(&gp->to2_timer,
 			  jiffies + msecs_to_jiffies(GPON_ACT_TO2_MS));
 	} else {
-		del_timer(&gp->to1_timer);
-		del_timer(&gp->to2_timer);
+		timer_delete(&gp->to1_timer);
+		timer_delete(&gp->to2_timer);
 	}
 
 	dev_info(xp->dev, "gpon: activation state -> %s\n",
@@ -194,7 +204,7 @@ void gpon_act_change_state(enum gpon_state new_state)
 
 static void gpon_act_to1_expires(struct timer_list *t)
 {
-	struct gpon_priv *gp = from_timer(gp, t, to1_timer);
+	struct gpon_priv *gp = timer_container_of(gp, t, to1_timer);
 	struct xpon_dev *xp = g_xp;
 
 	if (!xp || !gp)
@@ -223,7 +233,7 @@ static void gpon_act_to1_expires(struct timer_list *t)
 
 static void gpon_act_to2_expires(struct timer_list *t)
 {
-	struct gpon_priv *gp = from_timer(gp, t, to2_timer);
+	struct gpon_priv *gp = timer_container_of(gp, t, to2_timer);
 	struct xpon_dev *xp = g_xp;
 
 	if (!xp || !gp)
@@ -286,8 +296,8 @@ void gpon_act_deinit(void)
 	struct gpon_priv *gp = g_xp ? g_xp->gpon : NULL;
 
 	if (gp) {
-		del_timer_sync(&gp->to1_timer);
-		del_timer_sync(&gp->to2_timer);
+		timer_delete_sync(&gp->to1_timer);
+		timer_delete_sync(&gp->to2_timer);
 	}
 	tasklet_kill(&gpon_led_tasklet);
 }

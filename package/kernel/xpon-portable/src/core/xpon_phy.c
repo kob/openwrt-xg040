@@ -68,7 +68,8 @@ static void xpon_epon_set_security_key(struct xpon_dev *xp, int llid_idx,
 
 /* 10G-XEPON LLID key (an7581_epon_set_llid_key): EPON_LLID_KEY_0/1 with
  * EPON_LLID_KEY_VLD. Runtime MPCP FSM calls this. Bit-field TBD on hardware. */
-static void xpon_epon_set_llid_key(struct xpon_dev *xp, u32 key_lo, u32 key_hi)
+static void __maybe_unused xpon_epon_set_llid_key(struct xpon_dev *xp,
+						  u32 key_lo, u32 key_hi)
 {
 	void __iomem *ep = xp->mac2;
 
@@ -96,7 +97,8 @@ static int xpon_epon_init(struct xpon_dev *xp)
 	xpon_writel(ep, EPON_GLB_CFG, v | EPON_GLB_MAC_SW_RST);
 	udelay(10);
 	v = xpon_readl(ep, EPON_GLB_CFG);
-	xpon_writel(ep, EPON_GLB_CFG, v & ~EPON_GLB_MAC_SW_RST);
+	v &= ~EPON_GLB_MAC_SW_RST;
+	xpon_writel(ep, EPON_GLB_CFG, v);
 	udelay(10);
 	v |= EPON_GLB_RPT_TXPRI_CTRL;
 	xpon_writel(ep, EPON_GLB_CFG, v);
@@ -265,12 +267,18 @@ static void xpon_epon_handle_register(struct xpon_dev *xp, unsigned int n)
 	xpon_writel(ep, EPON_LLID_MAC_ADDR_1,
 		    ((u32)xp->epon_onu_mac[4] << 24) | ((u32)xp->epon_onu_mac[5] << 16));
 
-	/* Enable the LLID data path. NOTE: the enable-bit position is UNVERIFIED
-	 * (placeholder EPON_LLID_CFG_EN); confirm on hardware. */
+	/* Program the assigned LLID value into its 8-bit slice of the per-LLID
+	 * config register (EPON_LLID0_3_CFG / EPON_LLID4_7_CFG). The upstream
+	 * data-path *enable* is intentionally NOT written here: the four 8-bit LLID
+	 * fields occupy the entire 32-bit register, so a per-slice enable bit
+	 * (placeholder EPON_LLID_CFG_EN) would collide with a neighbouring LLID's
+	 * value bits and, for slice 3, shift out of the register (UB). The real
+	 * enable mechanism is hardware-specific and must be confirmed on silicon
+	 * before this FSM can open the upstream path. TODO: locate the real enable
+	 * register/field and program it here. */
 	cfg = xpon_readl(ep, EPON_LLID_CFG_REG(n));
 	cfg &= ~(EPON_LLID_CFG_LLID_MASK << EPON_LLID_CFG_SHIFT(n));
 	cfg |= (u32)onu_id << EPON_LLID_CFG_SHIFT(n);
-	cfg |= EPON_LLID_CFG_EN << EPON_LLID_CFG_SHIFT(n);
 	xpon_writel(ep, EPON_LLID_CFG_REG(n), cfg);
 
 	xpon_epon_send_register_ack(xp);
@@ -372,10 +380,13 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 	 * stock firmware's own serdes path). XGS-PON itself IS supported: the
 	 * XGS-PON MAC engine at mac+0x5000 is a parallel of the GPON engine and its
 	 * GEM/OMCI register block is now ported (see the XPON_MODE_XGPON case and
-	 * xpon.h XGS_GEM_*). 10G modes (XGS-PON and 10G-EPON). The 10G MAC engine is the sibling block at
-	 * mac+0x5000 (xgspon_reg); its 10G line rate is configured by the stock firmware's
-	 * own serdes path, so the generic PHY is deliberately not driven and the SCU
-	 * WAN_CONF field (GPON/EPON only) is left untouched. 10G-EPON additionally
+	 * xpon.h XGS_GEM_*).
+	 *
+	 * The GPON/EPON path below also drives the generic PON SERDES/PCS line rate
+	 * + PCS mode; the EN7581 serdes PHY driver only accepts GPON/EPON submodes,
+	 * so the 10G modes (XGS-PON, 10G-EPON) deliberately skip it -- their 10G
+	 * line rate is configured by the stock firmware's own serdes path and the
+	 * SCU WAN_CONF field (GPON/EPON only) is left untouched. 10G-EPON further
 	 * needs the 10G MAC switched to IEEE 802.3av framing (doEponSetMode in
 	 * xpon_10g.ko); that register map is still TBD. */
 	switch (mode) {
@@ -410,7 +421,7 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 
 		if (xp->xgspon_reg) {
 			gpon_gem_table_init();
-			xpon_writel(xp->xgspon_reg, XGS_IDLE_GEM_THLD,
+			xpon_writel(xp->xgspon_reg, DBG_IDLE_GEM_THLD,
 				    GPON_IDLE_GEM_THLD_DEF);
 			dev_info(xp->dev, "XGS-PON mode selected; GEM/OMCI engine at 0x1fb65000 initialised\n");
 		} else {
@@ -484,7 +495,7 @@ int XPON_PHY_SET_MODE(enum xpon_mode mode)
 	}
 
 	/* 2) Select the PON WAN line path in the SCU (GPON=0x00 / EPON=0x01).
-	 *    Offset EN7523_SCU_WAN_CONF=0x070 within the airoha,en7581-scu syscon;
+	 *    Offset XPON_SCU_WAN_CONF=0x070 within the airoha,en7581-scu syscon;
 	 *    the macro name is inherited from the EN7523 SCU but the field is the
 	 *    same on EN7581. Optional: delegated if no SCU phandle is present. */
 	if (xp->scu) {
@@ -512,18 +523,44 @@ void pon_phy_reset(void)
 	udelay(10);
 }
 
+void epon_set_laser_time(u8 laser_on, u8 laser_off)
+{
+	struct xpon_dev *xp = g_xp;
+
+	/* Reverse-engineered from stock xpon.ko eponSetlaserTime (0x31804) and
+	 * xpon_10g.ko doEponLaserTime (0x352f4): the laser on/off timing lives in
+	 * EPON_LASER_ONOFF_TIME -- low byte = laser-on, bits 8-15 = laser-off.
+	 * Default EPON_LASER_ONOFF_DEFAULT (0x2020) = on 0x20 / off 0x20. */
+	if (!xp || !xp->mac2)
+		return;
+	xpon_writel(xp->mac2, EPON_LASER_ONOFF_TIME,
+		    ((u32)laser_off << 8) | (u32)laser_on);
+}
+
 void pon_phy_tx_enable(bool on)
 {
-	/* The upstream laser enable lives in the BOSA/en7572 optical module driver
-	 * (bosa_en7572.ko / the Airoha optical driver), NOT in the GPON MAC window.
-	 * The MAC only gates the per-burst upstream transmission; the actual laser
-	 * on/off is the optical module's job. We therefore do not touch any MAC
-	 * register here and simply record the intent.
-	 *
-	 * TODO: if a PON_PHY-block TX-enable bit is reverse-engineered, set it here
-	 * (register/bit TBD — must come from the SoC PON_PHY space at 0x1faf0000,
-	 * not the GPON MAC window). */
-	(void)on;
+	struct xpon_dev *xp = g_xp;
+	void __iomem *ep;
+	u32 v;
+
+	if (!xp || !xp->mac2)
+		return;
+	ep = xp->mac2;
+
+	/* Reverse-engineered from stock xpon_10g.ko epon_dev_tx_rx_disable
+	 * (0x4096c): "TX/RX disable" gates the EPON MAC<->frame-engine bus by
+	 * setting EPON_GLB_CFG bits 8/9 (TXMBI_STOP|RXMBI_STOP) plus bits 12/13
+	 * (0x3300 mask), then stops the MPI bus. Enable clears them. This is the
+	 * MAC-side upstream-transmission gate; the per-burst laser timing is the
+	 * separate EPON_LASER_ONOFF_TIME register (see epon_set_laser_time()). */
+	v = xpon_readl(ep, EPON_GLB_CFG);
+	if (on)
+		v &= ~(EPON_GLB_TXMBI_STOP | EPON_GLB_RXMBI_STOP |
+		       EPON_GLB_TXRX_GATE_TBD);
+	else
+		v |=  (EPON_GLB_TXMBI_STOP | EPON_GLB_RXMBI_STOP |
+		       EPON_GLB_TXRX_GATE_TBD);
+	xpon_writel(ep, EPON_GLB_CFG, v);
 }
 
 void PhyTxLedConf(void)
@@ -534,17 +571,265 @@ void PhyTxLedConf(void)
 	 * O5). There is nothing to configure in the MAC window. */
 }
 
+/* XPON serdes PLL bring-up sequences, reverse-engineered from the stock
+ * kernel vmlinux.elf (JCPLL_BringUp/TXPLL_BringUp/Phya_BringUp + JCPLL
+ * sub-functions). Windows: xpon_serdes=0x1fa8a000, xpon_serdes_aux=0x1fa8b000. */
+
+static void serdes_jcpll_en(struct xpon_dev *xp, int en)
+{
+	/* JCPLL_EN(): read-modify-write AUX[0x828] EN field.
+	 * vendor: v = (0xfefe & (tmp >> 16)) | ((en & 1) | 0x100) */
+	u32 tmp = xpon_readl(xp->xpon_serdes_aux, 0x828);
+	u32 v = ((tmp >> 16) & 0xfefe) | ((en & 1) | 0x100);
+
+	xpon_writel(xp->xpon_serdes_aux, 0x828, v);
+}
+
+static void serdes_jcpll_bringup(struct xpon_dev *xp)
+{
+	u32 t;
+
+	/* JCPLL_BringUp body */
+	t = xpon_readl(xp->xpon_serdes, 0x48);
+	t |= 0x2000;
+	xpon_writel(xp->xpon_serdes, 0x48, t);
+	xpon_writel(xp->xpon_serdes, 0x1c, xpon_readl(xp->xpon_serdes, 0x1c));
+	t = xpon_readl(xp->xpon_serdes, 0x1c);
+	t |= 0x100;
+	xpon_writel(xp->xpon_serdes, 0x1c, t);
+
+	serdes_jcpll_en(xp, 0);		/* disable while reprogramming */
+
+	/* JCPLL_SDM */
+	xpon_writel(xp->xpon_serdes, 0x1c, 0xfcfeffff);
+	xpon_writel(xp->xpon_serdes, 0x20, 0xfefcfcfe);
+	t = xpon_readl(xp->xpon_serdes, 0x24);
+	t &= ~0x1;
+	xpon_writel(xp->xpon_serdes, 0x24, t);
+
+	/* JCPLL_SSC */
+	xpon_writel(xp->xpon_serdes, 0x38, 0x00000000);
+	t = xpon_readl(xp->xpon_serdes, 0x34);
+	t &= ~0x1;
+	xpon_writel(xp->xpon_serdes, 0x34, t);
+	xpon_writel(xp->xpon_serdes, 0x30, 0xfffcf8f8);
+
+	/* JCPLL_LPF */
+	xpon_writel(xp->xpon_serdes, 0x04, 0xc0c0feff);
+	xpon_writel(xp->xpon_serdes, 0x08, 0x00101f0a);
+	t = xpon_readl(xp->xpon_serdes, 0x0c);
+	t &= ~0x1f;
+	xpon_writel(xp->xpon_serdes, 0x0c, t);
+
+	/* JCPLL_VCO */
+	xpon_writel(xp->xpon_serdes, 0x2c, 0x04010100);
+	xpon_writel(xp->xpon_serdes, 0x30, xpon_readl(xp->xpon_serdes, 0x30));
+
+	/* JCPLL_PCW */
+	xpon_writel(xp->xpon_serdes_aux, 0x800, 0x25800000);
+	t = xpon_readl(xp->xpon_serdes_aux, 0x79c);
+	t |= 0x10000;
+	xpon_writel(xp->xpon_serdes_aux, 0x79c, t);
+
+	/* JCPLL_DIV */
+	t = xpon_readl(xp->xpon_serdes, 0x14);
+	t &= ~0x3;
+	xpon_writel(xp->xpon_serdes, 0x14, t);
+	t = xpon_readl(xp->xpon_serdes, 0x2c);
+	t &= ~0x3;
+	xpon_writel(xp->xpon_serdes, 0x2c, t);
+
+	/* JCPLL_KBand */
+	xpon_writel(xp->xpon_serdes, 0x10, 0xfffcfcfc);
+	xpon_writel(xp->xpon_serdes, 0x0c, 0x02e40000);
+
+	/* JCPLL_TCL(0x10) */
+	xpon_writel(xp->xpon_serdes, 0x48, xpon_readl(xp->xpon_serdes, 0x48));
+	xpon_writel(xp->xpon_serdes, 0x24, 0x05010100);
+	xpon_writel(xp->xpon_serdes, 0x28, xpon_readl(xp->xpon_serdes, 0x28));
+
+	serdes_jcpll_en(xp, 1);		/* enable */
+
+	/* JCPLL_Out */
+	xpon_writel(xp->xpon_serdes_aux, 0x828, 0x00000101);
+}
+
+static void serdes_txpll_bringup(struct xpon_dev *xp)
+{
+	/* TXPLL_BringUp body */
+	xpon_writel(xp->xpon_serdes, 0x84, xpon_readl(xp->xpon_serdes, 0x84));
+	xpon_writel(xp->xpon_serdes, 0x64, 0x01040001);
+}
+
+static void serdes_phya_bringup(struct xpon_dev *xp)
+{
+	/* Phya_BringUp body */
+	xpon_writel(xp->xpon_serdes_aux, 0x580, xpon_readl(xp->xpon_serdes_aux, 0x580));
+	xpon_writel(xp->xpon_serdes_aux, 0x260, 0x00000101);
+}
+
 int pon_serdes_init(void)
 {
-	/* SERDES lane bring-up (equalisation, TX/RX calibration, PCS link up) is
-	 * the largest remaining unknown. In the stock firmware it is performed by
-	 * the serdes_common PHY driver and the airoha,an7581-pcs-pon PCS driver,
-	 * which own serdes_common@1fa5a000 / xpon_usxgmii@1fa80000. The GPON MAC
-	 * register window (this driver) contains no SERDES registers.
-	 *
-	 * Until those sequences are reverse-engineered we rely on the mainline PCS
-	 * driver being probed for &pon_pcs. Return 0 so MAC bring-up continues; the
-	 * link will not train without the PCS driver, which is expected and
-	 * documented in the project README. */
+	struct xpon_dev *xp = g_xp;
+
+	if (!xp || !xp->xpon_serdes || !xp->xpon_serdes_aux) {
+		pr_warn("serdes init: windows not mapped, skip xSGMII programming\n");
+		return -ENODEV;
+	}
+
+	/* SERDES lane bring-up, register sequence reverse-engineered from the
+	 * stock kernel xsgmii_ini() (XPON instance, vmlinux.elf @0xc3574).
+	 * The vendor MCI cmd 29/31 path reduces to this xSGMII API: 142 writes
+	 * across four USXGMII PCS windows (see work/serdes序列完整提取-最终.c.txt).
+	 * This is the static init only; dynamic training (R2T / Rate / AN /
+	 * JCPLL-TXPLL read-modify-write) is still TODO. */
+  xpon_writel(xp->xpon_serdes, 0x000, 0x10040000);
+  xpon_writel(xp->xpon_serdes, 0x048, 0x001000ff);
+  xpon_writel(xp->xpon_serdes, 0x01c, 0x03000004);
+  xpon_writel(xp->xpon_serdes_aux, 0x828, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x020, 0x00030000);
+  xpon_writel(xp->xpon_serdes, 0x024, 0x05010100);
+  xpon_writel(xp->xpon_serdes, 0x038, 0x031b0082);
+  xpon_writel(xp->xpon_serdes, 0x034, 0x00008201);
+  xpon_writel(xp->xpon_serdes, 0x030, 0x0002301d);
+  xpon_writel(xp->xpon_serdes, 0x004, 0x00180000);
+  xpon_writel(xp->xpon_serdes, 0x008, 0x00101f0a);
+  xpon_writel(xp->xpon_serdes, 0x00c, 0x02ff0000);
+  xpon_writel(xp->xpon_serdes, 0x02c, 0x04010100);
+  xpon_writel(xp->xpon_serdes_aux, 0x800, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x79c, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x014, 0x00010000);
+  xpon_writel(xp->xpon_serdes, 0x010, 0x01000300);
+  xpon_writel(xp->xpon_serdes, 0x028, 0x00010400);
+  xpon_writel(xp->xpon_serdes, 0x084, 0x0101031b);
+  xpon_writel(xp->xpon_serdes, 0x064, 0x00040001);
+  xpon_writel(xp->xpon_serdes_aux, 0x854, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x068, 0x00000300);
+  xpon_writel(xp->xpon_serdes, 0x06c, 0x01000003);
+  xpon_writel(xp->xpon_serdes, 0x080, 0x00820082);
+  xpon_writel(xp->xpon_serdes, 0x07c, 0x00010000);
+  xpon_writel(xp->xpon_serdes, 0x050, 0x1f05000c);
+  xpon_writel(xp->xpon_serdes, 0x054, 0x00000005);
+  xpon_writel(xp->xpon_serdes, 0x074, 0x03000001);
+  xpon_writel(xp->xpon_serdes, 0x078, 0x04040401);
+  xpon_writel(xp->xpon_serdes_aux, 0x798, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x794, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x058, 0x030003ff);
+  xpon_writel(xp->xpon_serdes, 0x05c, 0x00000100);
+  xpon_writel(xp->xpon_serdes, 0x094, 0x00010010);
+  xpon_writel(xp->xpon_serdes, 0x070, 0x04000903);
+  xpon_writel(xp->xpon_serdes_aux, 0x580, 0x00000002);
+  xpon_writel(xp->xpon_serdes, 0x0c4, 0x00010400);
+  xpon_writel(xp->xpon_serdes_aux, 0x874, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x77c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x784, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x778, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x780, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x260, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x374, 0x00000002);
+  xpon_writel(xp->xpon_serdes_aux, 0x184, 0x040003ff);
+  xpon_writel(xp->xpon_serdes, 0x148, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x144, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x11c, 0x02000400);
+  xpon_writel(xp->xpon_serdes_aux, 0x004, 0x0c100a00);
+  xpon_writel(xp->xpon_serdes, 0x13c, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x120, 0x00000008);
+  xpon_writel(xp->xpon_serdes_aux, 0x320, 0x01010101);
+  xpon_writel(xp->xpon_serdes_aux, 0x48c, 0x01000203);
+  xpon_writel(xp->xpon_serdes, 0x0dc, 0x00000100);
+  xpon_writel(xp->xpon_serdes_aux, 0x80c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x814, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x10c, 0x00070600);
+  xpon_writel(xp->xpon_serdes_aux, 0x88c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x768, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x390, 0x00100010);
+  xpon_writel(xp->xpon_serdes_aux, 0x394, 0x0019000d);
+  xpon_writel(xp->xpon_serdes_aux, 0x39c, 0x00003307);
+  xpon_writel(xp->xpon_serdes, 0x0d4, 0xcaab1030);
+  xpon_writel(xp->xpon_serdes_aux, 0x100, 0x00c80064);
+  xpon_writel(xp->xpon_serdes_aux, 0x08c, 0x00000101);
+  xpon_writel(xp->xpon_serdes_aux, 0x104, 0x00000002);
+  xpon_writel(xp->xpon_serdes_aux, 0x090, 0x03e80002);
+  xpon_writel(xp->xpon_serdes_aux, 0x09c, 0x03e80002);
+  xpon_writel(xp->xpon_serdes_aux, 0x094, 0x03e80002);
+  xpon_writel(xp->xpon_serdes_aux, 0x098, 0x03e80002);
+  xpon_writel(xp->xpon_serdes_aux, 0x76c, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x0e8, 0x02000000);
+  xpon_writel(xp->xpon_serdes, 0x0f8, 0x04010808);
+  xpon_writel(xp->xpon_serdes, 0x0fc, 0x00080606);
+  xpon_writel(xp->xpon_serdes_aux, 0x120, 0x00000503);
+  xpon_writel(xp->xpon_serdes_aux, 0x088, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x38c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x000, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x33c, 0x01010101);
+  xpon_writel(xp->xpon_serdes_aux, 0x330, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x118, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x824, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x81c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x894, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x84c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x34c, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x114, 0x00040000);
+  xpon_writel(xp->xpon_serdes, 0x110, 0x00000200);
+  xpon_writel(xp->xpon_serdes_aux, 0x350, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x0d8, 0x0100000a);
+  xpon_writel(xp->xpon_serdes, 0x0cc, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x818, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x460, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x150, 0x0019000d);
+  xpon_writel(xp->xpon_serdes_aux, 0x14c, 0x00100010);
+  xpon_writel(xp->xpon_serdes_aux, 0x158, 0x00003307);
+  xpon_writel(xp->xpon_serdes_aux, 0x154, 0x0019000d);
+  xpon_writel(xp->xpon_serdes, 0x0f4, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x820, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x19c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x174, 0x04010000);
+  xpon_writel(xp->xpon_serdes, 0x100, 0x00010001);
+  xpon_writel(xp->xpon_serdes_r0, 0x000, 0x00002040);
+  xpon_writel(xp->xpon_serdes_r0, 0x22c, 0x00004c4c);
+  xpon_writel(xp->xpon_serdes_r0, 0x2c8, 0x00000000);
+  xpon_writel(xp->xpon_serdes_r0, 0x2cc, 0x00000000);
+  xpon_writel(xp->xpon_serdes_r0, 0x2e0, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x360, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x380, 0x0800a101);
+  xpon_writel(xp->xpon_serdes_r0, 0x2f8, 0x06330001);
+  xpon_writel(xp->xpon_serdes_r0, 0x030, 0x0000100d);
+  xpon_writel(xp->xpon_serdes, 0x000, 0x0c000c00);
+  xpon_writel(xp->xpon_serdes_aux, 0x474, 0x00000000);
+  xpon_writel(xp->xpon_serdes_r0, 0x2c0, 0x00000000);
+  xpon_writel(xp->xpon_serdes_r0, 0x2c4, 0x00000000);
+  xpon_writel(xp->xpon_serdes_r0, 0x2f0, 0x000000ff);
+  xpon_writel(xp->xpon_serdes_r0, 0x2f4, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x10c, 0x01010101);
+  xpon_writel(xp->xpon_serdes_aux, 0x114, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x47c, 0x00000100);
+  xpon_writel(xp->xpon_serdes_aux, 0x16c, 0x00000000);
+  xpon_writel(xp->xpon_serdes_aux, 0x208, 0x00010101);
+  xpon_writel(xp->xpon_serdes_r0, 0x2e8, 0x07070707);
+  xpon_writel(xp->xpon_serdes_r0, 0x2fc, 0x00001601);
+  xpon_writel(xp->xpon_serdes_r0, 0x320, 0x00000000);
+  xpon_writel(xp->xpon_serdes_r0, 0x31c, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x02c, 0x00000004);
+  xpon_writel(xp->xpon_serdes, 0x100, 0x80000000);
+  xpon_writel(xp->xpon_serdes_r1, 0x000, 0x0c9cc000);
+  xpon_writel(xp->xpon_serdes_aux, 0x178, 0x00020403);
+  xpon_writel(xp->xpon_serdes, 0x000, 0x00001140);
+  xpon_writel(xp->xpon_serdes, 0x018, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x034, 0x31120009);
+  xpon_writel(xp->xpon_serdes, 0x014, 0x00000000);
+  xpon_writel(xp->xpon_serdes, 0x020, 0x00000011);
+  xpon_writel(xp->xpon_serdes_r1, 0x014, 0x00000013);
+  xpon_writel(xp->xpon_serdes, 0x010, 0x00000001);
+  xpon_writel(xp->xpon_serdes_r1, 0x020, 0x00000113);
+  xpon_writel(xp->xpon_serdes, 0x14c, 0x00000001);
+  xpon_writel(xp->xpon_serdes, 0x018, 0x0100009c);
+  xpon_writel(xp->xpon_serdes, 0x004, 0x050f010f);
+  xpon_writel(xp->xpon_serdes_r1, 0x024, 0x00000000);
+
+	/* PLL bring-up (JCPLL/TXPLL/Phya), reverse-engineered from stock. */
+	serdes_jcpll_bringup(xp);
+	serdes_txpll_bringup(xp);
+	serdes_phya_bringup(xp);
+
 	return 0;
 }
