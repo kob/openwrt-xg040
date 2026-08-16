@@ -45,6 +45,30 @@
 	status = "okay";
 };
 
+&gdm2 {
+	/*
+	 * PON WAN port: gdm2 is the Ethernet MAC wired to the pon_pcs PCS
+	 * (see an7581.dtsi: gdm2 has pcs-handle = <&pon_pcs>). The XPON driver
+	 * (kmod-xpon-portable) creates the PON netdevice and drives the GPON
+	 * MAC at 0x1fb64000; gdm2 is the CPU-side data path for WAN traffic
+	 * once the ONU reaches O5 (operational) state.
+	 *
+	 * phy-mode "internal" because the PON MAC↔PCS link is on-chip.
+	 * Label "wan" so 02_network can bind the WAN interface to it.
+	 */
+	status = "okay";
+
+	openwrt,netdev-name = "wan";
+	phy-mode = "internal";
+
+	nvmem-cell-names = "mac-address";
+	nvmem-cells = <&macaddr_factory_3e (6)>;
+};
+
+&xpon {
+	status = "okay";
+};
+
 &snfi {
 	status = "okay";
 };

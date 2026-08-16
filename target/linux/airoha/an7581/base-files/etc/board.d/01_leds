@@ -19,6 +19,13 @@ gemtek,w1700k-ubi)
 	ucidef_set_led_netdev "lan4-yellow" "lan4" "yellow:lan-4" "lan4" "link_10 link_100"
 	ucidef_set_led_netdev "lan4-green" "lan4" "green:lan-4" "lan4" "link_1000 tx rx"
 	;;
+nokia,xg-040g-md |\
+nokia,xg-040g-md-ubi)
+	# WAN link state on gdm2 (PON). The xpon driver exposes ONU state via
+	# sysfs (onu_state); the green:wan LED tracks the "wan" netdev once the
+	# ONU reaches O5 and the OMCI data path is up.
+	ucidef_set_led_netdev "wan" "WAN" "green:wan" "wan" "link tx rx"
+	;;
 esac
 
 board_config_flush

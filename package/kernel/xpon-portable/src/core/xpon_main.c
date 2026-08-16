@@ -392,6 +392,116 @@ static ssize_t epon_onu_mac_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(epon_onu_mac);
 
+/* --- Optical monitoring (TX/RX power, LOS, temperature) -----------------
+ *
+ * EN7581 exposes optical power via the PON PHY register window
+ * (xp->pon_phy, base 0x1faf0000). The RX power register is at offset
+ * 0x54 (16-bit, signed, 0.1 dBm units, 2's complement for negative values);
+ * TX power/bias and temperature live in the PON PHY aux0 window
+ * (xp->pon_phy_aux0, base 0x1faf3000) at offsets documented in the
+ * vendor airoha_pon_phy driver (tx_power@0x10, temperature@0x14, bias@0x18).
+ *
+ * These offsets are reverse-engineered from the stock pon_phy.ko bring-up
+ * and match the merbanan/airoha_ml reference en7581-base.dtsi. If a value
+ * reads 0 or 0xffff the BOSA calibration data is not loaded, which is
+ * expected on cold boot until the OMCI daemon applies the factory
+ * calibration from the nvmem "calib" partition.
+ *
+ * Values returned are RAW register reads; user-space (omcid or luci-app-xpon)
+ * converts them to dBm / degrees Celsius using the BOSA calibration table.
+ */
+static ssize_t rx_power_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct xpon_dev *xp = platform_get_drvdata(to_platform_device(dev));
+	u16 raw;
+	s32 dbm_x10;
+
+	(void)attr;
+	if (!xp->pon_phy)
+		return snprintf(buf, PAGE_SIZE, "N/A\n");
+
+	/* PON PHY RX power register: 16-bit signed, 0.1 dBm steps.
+	 * Reading 0 or 0xffff means LOS (no light) or uncalibrated. */
+	raw = readw(xp->pon_phy + 0x54);
+	if (raw == 0 || raw == 0xffff)
+		return snprintf(buf, PAGE_SIZE, "LOS\n");
+
+	/* Convert to signed 0.1 dBm: the register uses 2's complement. */
+	dbm_x10 = (s16)raw;
+	return snprintf(buf, PAGE_SIZE, "%d\n", dbm_x10);
+}
+static DEVICE_ATTR_RO(rx_power);
+
+static ssize_t tx_power_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct xpon_dev *xp = platform_get_drvdata(to_platform_device(dev));
+	u16 raw;
+
+	(void)attr;
+	if (!xp->pon_phy_aux0)
+		return snprintf(buf, PAGE_SIZE, "N/A\n");
+
+	raw = readw(xp->pon_phy_aux0 + 0x10);
+	if (raw == 0 || raw == 0xffff)
+		return snprintf(buf, PAGE_SIZE, "N/A\n");
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", (s16)raw);
+}
+static DEVICE_ATTR_RO(tx_power);
+
+static ssize_t optical_temp_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct xpon_dev *xp = platform_get_drvdata(to_platform_device(dev));
+	u16 raw;
+
+	(void)attr;
+	if (!xp->pon_phy_aux0)
+		return snprintf(buf, PAGE_SIZE, "N/A\n");
+
+	/* Temperature register: 16-bit signed, 1/256 degree C steps.
+	 * Common Airoha BOSA convention: raw * 1000 / 256 in milli-degC. */
+	raw = readw(xp->pon_phy_aux0 + 0x14);
+	if (raw == 0 || raw == 0xffff)
+		return snprintf(buf, PAGE_SIZE, "N/A\n");
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", (s16)raw * 1000 / 256);
+}
+static DEVICE_ATTR_RO(optical_temp);
+
+/* LOS (Loss of Signal) alarm status. Read from the PON PHY status register.
+ * bit 0 of the PHY status (offset 0x00 in pon_phy window) indicates LOS:
+ *   1 = signal lost (no light or below threshold)
+ *   0 = signal present
+ */
+static ssize_t los_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct xpon_dev *xp = platform_get_drvdata(to_platform_device(dev));
+	u32 status;
+
+	(void)attr;
+	if (!xp->pon_phy)
+		return snprintf(buf, PAGE_SIZE, "unknown\n");
+
+	status = readl(xp->pon_phy);
+	return snprintf(buf, PAGE_SIZE, "%s\n", (status & BIT(0)) ? "1" : "0");
+}
+static DEVICE_ATTR_RO(los);
+
+/* PON link status: 1 if the ONU is in O5 (operational) state and the
+ * OMCI data path is up, 0 otherwise. Convenience attribute for
+ * monitoring scripts and LuCI. */
+static ssize_t pon_link_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct xpon_dev *xp = platform_get_drvdata(to_platform_device(dev));
+	u32 state;
+
+	(void)attr;
+	state = gpon_get_activation_state();
+	/* GPON_STATE_O5 == 5 (see enum gpon_state in xpon.h). */
+	return snprintf(buf, PAGE_SIZE, "%s\n", (state == 5) ? "1" : "0");
+}
+static DEVICE_ATTR_RO(pon_link);
+
 static struct attribute *xpon_attrs[] = {
 	&dev_attr_sn.attr,
 	&dev_attr_password.attr,
@@ -399,6 +509,11 @@ static struct attribute *xpon_attrs[] = {
 	&dev_attr_onu_state.attr,
 	&dev_attr_gpon_counters.attr,
 	&dev_attr_epon_onu_mac.attr,
+	&dev_attr_rx_power.attr,
+	&dev_attr_tx_power.attr,
+	&dev_attr_optical_temp.attr,
+	&dev_attr_los.attr,
+	&dev_attr_pon_link.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(xpon);

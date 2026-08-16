@@ -1,0 +1,61 @@
+{
+	"luci-app-xpon": {
+		"description": "Access to xpon-portable PON driver sysfs, UCI config, and factory-equivalent OMCI runtime status files",
+		"read": {
+			"ubus": {
+				"service": ["list"],
+				"luci.xpon": ["*"]
+			},
+			"uci": ["xpon"],
+			"file": {
+				"/var/run/xpon/sysfs_path": ["read"],
+				"/sys/bus/platform/devices/*xpon*/*": ["read"],
+				"/sys/bus/of-platform/devices/*xpon*/*": ["read"],
+				"/tmp/reg.txt": ["read"],
+				"/tmp/registerstimes": ["read"],
+				"/tmp/pon_authtype": ["read"],
+				"/tmp/omciini/pon_authtype": ["read"],
+				"/tmp/omcivendor": ["read"],
+				"/tmp/ont_register_info": ["read"],
+				"/tmp/slid.txt": ["read"],
+				"/tmp/omciini/slidinfo": ["read"],
+				"/tmp/pon_conn": ["read"],
+				"/tmp/ponifuptime": ["read"],
+				"/tmp/omci_startup": ["read"],
+				"/tmp/omciini/hardwareversion": ["read"],
+				"/tmp/txpowererror": ["read"],
+				"/tmp/omci.log": ["read"],
+				"/tmp/omci.log.bak": ["read"],
+				"/tmp/omciini/omcidebugmode": ["read"],
+				"/tmp/dataStoreInProgress": ["read"],
+				"/tmp/dataStore.txt.TOP": ["read"],
+				"/tmp/dataStore.txt.OMCI": ["read"],
+				"/tmp/dataStore.txt.VOICE": ["read"],
+				"/tmp/dataStore.txt.IGMP": ["read"],
+				"/tmp/dataStore.txt.ETHOAM": ["read"],
+				"/configs/oltmsg.txt": ["read"],
+				"/configs/omciRecordOltMsg": ["read"],
+				"/configs/sw_ver": ["read"],
+				"/configs/systemInfo": ["read"],
+				"/configs/systemInfo1": ["read"],
+				"/configs/zeroman/version": ["read"],
+				"/configs/log/omciMgrTrace": ["read"],
+				"/configs/log/omciParserTrace": ["read"],
+				"/configs/log/ploamTrace": ["read"],
+				"/configs/ploam_on": ["read"],
+				"/configs/pon_disabled": ["read"],
+				"/configs/mdu/nonSync.cfg": ["read"],
+				"/tmp/ont_loid_failure": ["read"],
+				"/tmp/ont_pwd_failure": ["read"],
+				"/tmp/ont_pon_down": ["read"],
+				"/tmp/error_slid": ["read"]
+			},
+			"exec": {
+				"/sbin/ritool": ["getuplinkmode", "getsysponmode", "getlanmode", "getBoardID", "getOperatorID"]
+			}
+		},
+		"write": {
+			"uci": ["xpon"]
+		}
+	}
+}

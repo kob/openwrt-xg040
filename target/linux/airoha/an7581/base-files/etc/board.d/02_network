@@ -22,7 +22,13 @@ an7581_setup_interfaces()
 		;;
 	nokia,xg-040g-md |\
 	nokia,xg-040g-md-ubi)
-		ucidef_set_interface_lan "lan1 lan2 lan3 lan4"
+		# LAN ports via the internal switch (gsw_port2..4) + gdm4 (2.5G).
+		# WAN port is gdm2, wired to the on-chip pon_pcs and driven by
+		# kmod-xpon-portable's PON netdevice. Once the ONU reaches O5 the
+		# WAN interface comes up; default protocol is DHCP so the device
+		# gets an IP from the operator's B-RAS automatically. Change to
+		# pppoe/dhcp/none in LuCI as needed (bridge mode for IPTV/route mode).
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
 		;;
 	*)
 		echo "Unsupported hardware. Network interfaces not initialized"

@@ -1,0 +1,299 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+#
+# rpcd backend for luci-app-xpon P3 phase.
+#
+# Exposes the *factory-equivalent* OMCI runtime data surface to LuCI via ubus
+# call `luci.xpon <method>`.  The factory firmware's omciMgr + appmgr wrote
+# status files into /tmp and /configs; we surface the same fields through rpcd
+# so the OpenWrt LuCI page can render them regardless of whether the
+# xpon-portable kmod, the Go omcid, or even the binary omciMgr is the active
+# PON stack.  Whenever a field is unavailable the JSON value is null and the
+# page shows "N/A".
+#
+# Methods:
+#   status        : mode, reg_state, authtype, vendor, onu_register_info,
+#                   ploam_on, pon_disabled, slid, slidinfo, reg_times,
+#                   pon_conn, pon_uptime, omci_startup, error_slid,
+#                   loid_failure, pwd_failure, pon_down
+#   optical       : rx_power, tx_power, temperature, voltage, bias_current,
+#                   los, vendor_name, vendor_pn, vendor_sn, opt_sn, thresholds
+#   olt           : oltmsg (last 8 lines), oltmsg_record_present, version,
+#                   sw_ver, system_info, zeroman_version
+#   logs          : omci_log (tail 30), omci_log_bak_present, omcimgr_trace,
+#                   parser_trace, ploam_trace
+#   datastore     : in_progress, top, omci, voice, igmp, ethoam
+#   counters      : tcont_stats, gpon_counters  (from xpon-portable sysfs)
+#   mode_set      : <set>  (rpcd write — set PON mode, run ritool or echo)
+#
+# Each method returns JSON on stdout.  rpcd turns the last line of stdout into
+# the ubus reply, so we print a single compact JSON object.
+#
+# Security:  this script runs as root (rpcd default).  All inputs are paths
+# we control; no user data is ever passed to a shell.
+
+RPCD_CALLERS_GROUP=root   # rpcd runs as root by default in OpenWrt
+
+# --- helpers ---------------------------------------------------------------
+
+# Read first line of a file, returning "" if absent or unreadable.
+read_first() {
+	[ -r "$1" ] || { echo ""; return; }
+	head -n 1 "$1" 2>/dev/null | tr -d '\r\n'
+}
+
+# Read a file trimmed, single line.
+read_trim() {
+	[ -r "$1" ] || { echo ""; return; }
+	cat "$1" 2>/dev/null | tr -d '\r\n' | head -n 1
+}
+
+# Read boolean flag file: returns "1" if the file exists (truthy), else "0".
+flag_present() {
+	[ -e "$1" ] && echo 1 || echo 0
+}
+
+# Escape a string for JSON: backslash, double-quote, control chars.
+# Reads stdin, writes escaped string on stdout (no surrounding quotes).
+# Pure awk implementation (no sed quoting headaches).
+json_escape() {
+	awk '
+	BEGIN { RS = "\x00"; ORS = "" }
+	{
+		gsub(/\\/, "\\\\")
+		gsub(/"/, "\\\"")
+		gsub(/\t/, "\\t")
+		gsub(/\r/, "\\r")
+		gsub(/\n/, "\\n")
+		print
+	}'
+}
+
+# Read up to N lines of a file and emit as a JSON string array element list.
+# Args: file maxlines
+json_tail_str() {
+	local f="$1" n="$2"
+	if [ ! -r "$f" ]; then
+		printf 'null'
+		return
+	fi
+	# Build a single JSON string with \n separators.
+	local body
+	body=$(tail -n "$n" "$f" 2>/dev/null | json_escape)
+	printf '"%s"' "$body"
+}
+
+# Numeric/unknown wrapper: if empty -> null, else quote unless -n given.
+json_val() {
+	local v="$1"
+	if [ -z "$v" ]; then
+		printf 'null'
+	else
+		# Treat as string by default.
+		printf '"%s"' "$(printf '%s' "$v" | json_escape)"
+	fi
+}
+
+# Like json_val but emits a bare number when the value is integer-ish.
+json_num() {
+	local v="$1"
+	if [ -z "$v" ]; then
+		printf 'null'
+		return
+	fi
+	case "$v" in
+		''|*[!0-9-]*)
+			# Not a pure integer — emit as string.
+			printf '"%s"' "$(printf '%s' "$v" | json_escape)"
+			;;
+		*)
+			printf '%s' "$v"
+			;;
+	esac
+}
+
+# --- method: status --------------------------------------------------------
+method_status() {
+	# PON mode via ritool (factory binary may be absent on OpenWrt; fall back
+	# to UCI / xpon sysfs).
+	local uplink syspon lanmode
+	if command -v ritool >/dev/null 2>&1; then
+		uplink=$(ritool getuplinkmode 2>/dev/null | tr -d '\r\n')
+		syspon=$(ritool getsysponmode 2>/dev/null | tr -d '\r\n')
+		lanmode=$(ritool getlanmode 2>/dev/null | tr -d '\r\n')
+	fi
+	[ -z "$uplink" ] && uplink=$(uci -q get xpon.@xpon[0].pon_mode 2>/dev/null)
+	# Map numeric UCI mode -> string for parity with ritool.
+	case "$uplink" in
+		0) uplink="gpon";;
+		1) uplink="epon";;
+		2) uplink="xgpon1";;   # XGS-PON; ritool reports xgpon1 for XGPON1 family
+		3) uplink="xepon";;
+	esac
+
+	local reg=$(read_trim /tmp/reg.txt)
+	local reg_times=$(read_trim /tmp/registerstimes)
+	local authtype=$(read_trim /tmp/omciini/pon_authtype)
+	[ -z "$authtype" ] && authtype=$(read_trim /tmp/pon_authtype)
+	local vendor=$(read_trim /tmp/omcivendor)
+	local onu_reg_info
+	onu_reg_info=$(json_tail_str /tmp/ont_register_info 5)
+	local ploam_on=$(flag_present /configs/ploam_on)
+	local pon_disabled=$(flag_present /configs/pon_disabled)
+	local slid=$(read_trim /tmp/slid.txt)
+	local slidinfo
+	slidinfo=$(json_tail_str /tmp/omciini/slidinfo 3)
+	local pon_conn=$(read_trim /tmp/pon_conn)
+	local pon_uptime=$(read_trim /tmp/ponifuptime)
+	local omci_startup=$(flag_present /tmp/omci_startup)
+	local error_slid=$(flag_present /tmp/error_slid)
+	local loid_failure=$(flag_present /tmp/ont_loid_failure)
+	local pwd_failure=$(flag_present /tmp/ont_pwd_failure)
+	local pon_down=$(flag_present /tmp/ont_pon_down)
+	local hw_ver=$(read_trim /tmp/omciini/hardwareversion)
+
+	# ONU activation state from xpon-portable sysfs (when present).
+	local onu_state=""
+	local sysfs_path
+	sysfs_path=$(read_trim /var/run/xpon/sysfs_path 2>/dev/null)
+	if [ -n "$sysfs_path" ] && [ -r "$sysfs_path/onu_state" ]; then
+		onu_state=$(cat "$sysfs_path/onu_state" 2>/dev/null | tr -d '\r\n')
+	fi
+
+	# Single-line JSON (rpcd picks the last stdout line).
+	printf '{"uplink":%s,"sysponmode":%s,"lanmode":%s,"reg_state":%s,"reg_times":%s,"authtype":%s,"vendor":%s,"onu_register_info":%s,"ploam_on":%s,"pon_disabled":%s,"slid":%s,"slidinfo":%s,"pon_conn":%s,"pon_uptime":%s,"omci_startup":%s,"error_slid":%s,"loid_failure":%s,"pwd_failure":%s,"pon_down":%s,"hardware_version":%s,"onu_state":%s,"sysfs_path":%s}' \
+		"$(json_val "$uplink")" "$(json_val "$syspon")" "$(json_val "$lanmode")" \
+		"$(json_num "$reg")" "$(json_num "$reg_times")" "$(json_val "$authtype")" \
+		"$(json_val "$vendor")" "$onu_reg_info" "$(json_num "$ploam_on")" \
+		"$(json_num "$pon_disabled")" "$(json_val "$slid")" "$slidinfo" \
+		"$(json_val "$pon_conn")" "$(json_num "$pon_uptime")" "$(json_num "$omci_startup")" \
+		"$(json_num "$error_slid")" "$(json_num "$loid_failure")" "$(json_num "$pwd_failure")" \
+		"$(json_num "$pon_down")" "$(json_val "$hw_ver")" "$(json_val "$onu_state")" \
+		"$(json_val "$sysfs_path")"
+}
+
+# --- method: optical -------------------------------------------------------
+method_optical() {
+	# Prefer libGponRSSI calls when the factory lib is present; otherwise fall
+	# back to the xpon-portable sysfs attributes.
+	local rx tx temp volt bias los vendor_name vendor_pn vendor_sn opt_sn
+	local sysfs_path
+	sysfs_path=$(read_trim /var/run/xpon/sysfs_path 2>/dev/null)
+
+	if command -v rssi_tool >/dev/null 2>&1; then
+		# rssi_tool is the factory CLI for libGponRSSI; parse its output.
+		rx=$(rssi_tool get rxpower 2>/dev/null | tr -d '\r\n')
+		tx=$(rssi_tool get txpower 2>/dev/null | tr -d '\r\n')
+		temp=$(rssi_tool get temp 2>/dev/null | tr -d '\r\n')
+		volt=$(rssi_tool get volt 2>/dev/null | tr -d '\r\n')
+		bias=$(rssi_tool get bias 2>/dev/null | tr -d '\r\n')
+		los=$(rssi_tool get los 2>/dev/null | tr -d '\r\n')
+		vendor_name=$(rssi_tool get vendorname 2>/dev/null | tr -d '\r\n')
+		vendor_pn=$(rssi_tool get vendorpn 2>/dev/null | tr -d '\r\n')
+		vendor_sn=$(rssi_tool get vendorsn 2>/dev/null | tr -d '\r\n')
+		opt_sn=$(rssi_tool get optsn 2>/dev/null | tr -d '\r\n')
+	fi
+
+	# Fallback to xpon-portable sysfs.
+	if [ -n "$sysfs_path" ]; then
+		[ -z "$rx" ] && [ -r "$sysfs_path/rx_power" ] && rx=$(read_trim "$sysfs_path/rx_power")
+		[ -z "$tx" ] && [ -r "$sysfs_path/tx_power" ] && tx=$(read_trim "$sysfs_path/tx_power")
+		[ -z "$temp" ] && [ -r "$sysfs_path/optical_temp" ] && temp=$(read_trim "$sysfs_path/optical_temp")
+		[ -z "$los" ] && [ -r "$sysfs_path/los" ] && los=$(read_trim "$sysfs_path/los")
+	fi
+
+	# txpowererror flag.
+	local txperr=$(flag_present /tmp/txpowererror)
+
+	printf '{"rx_power":%s,"tx_power":%s,"temperature":%s,"voltage":%s,"bias_current":%s,"los":%s,"vendor_name":%s,"vendor_pn":%s,"vendor_sn":%s,"opt_sn":%s,"txpower_error":%s}' \
+		"$(json_val "$rx")" "$(json_val "$tx")" "$(json_val "$temp")" "$(json_val "$volt")" \
+		"$(json_val "$bias")" "$(json_val "$los")" "$(json_val "$vendor_name")" \
+		"$(json_val "$vendor_pn")" "$(json_val "$vendor_sn")" "$(json_val "$opt_sn")" \
+		"$(json_num "$txperr")"
+}
+
+# --- method: olt -----------------------------------------------------------
+method_olt() {
+	local oltmsg
+	oltmsg=$(json_tail_str /configs/oltmsg.txt 8)
+	local record_present=$(flag_present /configs/omciRecordOltMsg)
+	local sw_ver=$(read_trim /configs/sw_ver)
+	local sys_info
+	sys_info=$(json_tail_str /configs/systemInfo 4)
+	local sys_info1
+	sys_info1=$(json_tail_str /configs/systemInfo1 4)
+	local zeroman
+	zeroman=$(json_tail_str /configs/zeroman/version 2)
+
+	printf '{"oltmsg":%s,"oltmsg_record_present":%s,"sw_ver":%s,"system_info":%s,"system_info1":%s,"zeroman_version":%s}' \
+		"$oltmsg" "$(json_num "$record_present")" "$(json_val "$sw_ver")" \
+		"$sys_info" "$sys_info1" "$zeroman"
+}
+
+# --- method: logs ----------------------------------------------------------
+method_logs() {
+	local omci_log
+	omci_log=$(json_tail_str /tmp/omci.log 30)
+	local bak_present=$(flag_present /tmp/omci.log.bak)
+	local omcimgr_trace
+	omcimgr_trace=$(json_tail_str /configs/log/omciMgrTrace 20)
+	local parser_trace
+	parser_trace=$(json_tail_str /configs/log/omciParserTrace 20)
+	local ploam_trace
+	ploam_trace=$(json_tail_str /configs/log/ploamTrace 20)
+	local debug_mode=$(flag_present /tmp/omciini/omcidebugmode)
+
+	printf '{"omci_log":%s,"omci_log_bak_present":%s,"omcimgr_trace":%s,"parser_trace":%s,"ploam_trace":%s,"debug_mode":%s}' \
+		"$omci_log" "$(json_num "$bak_present")" "$omcimgr_trace" \
+		"$parser_trace" "$ploam_trace" "$(json_num "$debug_mode")"
+}
+
+# --- method: datastore -----------------------------------------------------
+method_datastore() {
+	local in_prog=$(flag_present /tmp/dataStoreInProgress)
+	local top
+	top=$(json_tail_str /tmp/dataStore.txt.TOP 10)
+	local omci
+	omci=$(json_tail_str /tmp/dataStore.txt.OMCI 10)
+	local voice
+	voice=$(json_tail_str /tmp/dataStore.txt.VOICE 10)
+	local igmp
+	igmp=$(json_tail_str /tmp/dataStore.txt.IGMP 10)
+	local ethoam
+	ethoam=$(json_tail_str /tmp/dataStore.txt.ETHOAM 10)
+
+	printf '{"in_progress":%s,"top":%s,"omci":%s,"voice":%s,"igmp":%s,"ethoam":%s}' \
+		"$(json_num "$in_prog")" "$top" "$omci" "$voice" "$igmp" "$ethoam"
+}
+
+# --- method: counters ------------------------------------------------------
+method_counters() {
+	local sysfs_path
+	sysfs_path=$(read_trim /var/run/xpon/sysfs_path 2>/dev/null)
+	local tcont_stats="" gpon_counters=""
+	if [ -n "$sysfs_path" ]; then
+		[ -r "$sysfs_path/tcont_stats" ] && tcont_stats=$(cat "$sysfs_path/tcont_stats" 2>/dev/null)
+		[ -r "$sysfs_path/gpon_counters" ] && gpon_counters=$(cat "$sysfs_path/gpon_counters" 2>/dev/null)
+	fi
+	# JSON-escape multi-line.
+	local tcont_esc gpon_esc
+	tcont_esc=$(printf '%s' "$tcont_stats" | json_escape)
+	gpon_esc=$(printf '%s' "$gpon_counters" | json_escape)
+	printf '{"tcont_stats":"%s","gpon_counters":"%s","sysfs_path":%s}' \
+		"$tcont_esc" "$gpon_esc" "$(json_val "$sysfs_path")"
+}
+
+# --- dispatch --------------------------------------------------------------
+
+case "$1" in
+	status)   method_status ;;
+	optical)  method_optical ;;
+	olt)      method_olt ;;
+	logs)     method_logs ;;
+	datastore) method_datastore ;;
+	counters) method_counters ;;
+	*)
+		echo '{"error":"unknown method"}'
+		exit 1
+		;;
+esac

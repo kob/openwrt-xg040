@@ -54,8 +54,10 @@ define Package/omcid/install
 	$(INSTALL_BIN) $(PKG_BUILD_DIR)/omcid $(1)/usr/sbin/omcid
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/omcid.init $(1)/etc/init.d/omcid
+	$(INSTALL_BIN) ./files/xpon.init $(1)/etc/init.d/xpon
 	$(INSTALL_DIR) $(1)/etc/config
 	$(INSTALL_CONF) ./files/omcid.config $(1)/etc/config/omcid
+	$(INSTALL_CONF) ./files/xpon.config $(1)/etc/config/xpon
 endef
 
 $(eval $(call BuildPackage,omcid))

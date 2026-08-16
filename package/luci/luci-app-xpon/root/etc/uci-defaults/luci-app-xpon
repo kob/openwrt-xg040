@@ -1,0 +1,30 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Register the luci-app-xpon menu entry and grant the admin group access.
+#
+# Adds menu item under Network -> PON / XPON (LuCI client-side JS auto-discovers
+# view/network/xpon.js).  Also seeds the xpon UCI config and registers the
+# ubus ACL for the P3 rpcd backend (luci.xpon).
+
+# --- 1. Ensure /etc/config/xpon exists with a default section -------------
+if [ ! -f /etc/config/xpon ]; then
+	touch /etc/config/xpon
+fi
+if ! uci -q get xpon.@xpon[0] >/dev/null 2>&1; then
+	uci -q add xpon xpon >/dev/null
+	uci -q set xpon.@xpon[0].pon_mode='0'
+	uci -q commit xpon
+fi
+
+# --- 2. Make the rpcd backend executable ---------------------------------
+# The file ships 0644 by default; rpcd refuses to exec non-x scripts.
+RPCD_BACKEND=/usr/share/rpcd/luci.xpon
+[ -f "$RPCD_BACKEND" ] && chmod 0755 "$RPCD_BACKEND" 2>/dev/null
+
+# --- 3. Reload rpcd so the new 'luci.xpon' session object is picked up ---
+if pidof rpcd >/dev/null 2>&1; then
+	/etc/init.d/rpcd reload 2>/dev/null || \
+		killall -HUP rpcd 2>/dev/null
+fi
+
+exit 0

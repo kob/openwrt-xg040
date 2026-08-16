@@ -641,6 +641,26 @@
 			interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
+		/*
+		 * XPON MAC: GPON/XGS-PON/EPON MAC engine (three sibling sub-blocks
+		 * at GPON@0x1fb64000 / XGS@0x1fb65000 / EPON@0x1fb66000).
+		 * Bound by kmod-xpon-portable (compatible "econet,ecnt-xpon"),
+		 * the reverse-engineered source driver for the EN7581 PON MAC.
+		 * IRQ 42 = XPON MAC INT, IRQ 34 = Dying-Gasp INT.
+		 * Default disabled; enabled per-board (e.g. an758x-nokia_xg-040g-common.dtsi).
+		 */
+		xpon: xpon@1fb64000 {
+			compatible = "econet,ecnt-xpon";
+			reg = <0x0 0x1fb64000 0x0 0x3e8>,
+			      <0x0 0x1fb66000 0x0 0x23c>,
+			      <0x0 0x1fb65000 0x0 0xff8>;
+			interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 34 IRQ_TYPE_LEVEL_HIGH>;
+			airoha,scu = <&scuclk>;
+
+			status = "disabled";
+		};
+
 		thermal: thermal-sensor@1efbd000 {
 			compatible = "airoha,en7581-thermal";
 			reg = <0x0 0x1efbd000 0x0 0xd5c>;
